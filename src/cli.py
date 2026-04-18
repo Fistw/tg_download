@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import sys
+
+from .config import load_config
+from .client import ClientManager
+from .downloader import download_by_link, download_range
+from .database import DownloadDB
+from .monitor import start_monitor
+from .bot_handler import setup_bot_handlers
+from .utils import parse_range, format_file_size
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="tg-download",
+        description="下载 Telegram 频道中受限制的视频文件",
+    )
+    parser.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
+    parser.add_argument("-v", "--verbose", action="store_true", help="启用详细日志")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # download 子命令
+    dl = sub.add_parser("download", help="下载指定链接或范围的视频")
+    dl.add_argument("target", help="Telegram 消息链接或频道名")
+    dl.add_argument("--range", dest="msg_range", help="消息 ID 范围，格式: start-end")
+    dl.add_argument("-o", "--output", help="下载输出目录")
+
+    # serve 子命令
+    sv = sub.add_parser("serve", help="启动 Bot + 频道监控服务")
+    sv.add_argument("--no-bot", action="store_true", help="不启动 Bot")
+    sv.add_argument("--no-monitor", action="store_true", help="不启动监控")
+
+    return parser
+
+
+def _print_progress(current: int, total: int) -> None:
+    """CLI 进度回调，打印到 stderr。"""
+    from .utils import format_progress
+    sys.stderr.write(f"\r{format_progress(current, total)}")
+    sys.stderr.flush()
+    if total > 0 and current >= total:
+        sys.stderr.write("\n")
+
+
+async def _cmd_download(args, config) -> None:
+    output_dir = args.output or config.download.output_dir
+    manager = ClientManager(config)
+    await manager.start(start_bot=False)
+    try:
+        if args.msg_range:
+            start_id, end_id = parse_range(args.msg_range)
+            paths = await download_range(
+                manager.user, args.target, start_id, end_id, output_dir,
+                _print_progress, max_concurrent=config.download.max_concurrent
+            )
+            print(f"\n下载完成，共 {len(paths)} 个文件:")
+            for p in paths:
+                size = format_file_size(p.stat().st_size) if p.exists() else "?"
+                print(f"  {p} ({size})")
+        else:
+            path = await download_by_link(manager.user, args.target, output_dir, _print_progress)
+            if path is None:
+                print("该消息不包含视频内容")
+            else:
+                size = format_file_size(path.stat().st_size) if path.exists() else "?"
+                print(f"\n下载完成: {path} ({size})")
+    finally:
+        await manager.stop()
+
+
+async def _cmd_serve(args, config) -> None:
+    start_bot = not args.no_bot and bool(config.telegram.bot_token)
+    manager = ClientManager(config)
+    await manager.start(start_bot=start_bot)
+
+    history = DownloadDB()
+    try:
+        if not args.no_monitor:
+            await start_monitor(
+                manager.user, config.monitor, config.download.output_dir, history
+            )
+
+        if start_bot:
+            await setup_bot_handlers(manager.bot, manager.user, config, history)
+
+        print("服务已启动，按 Ctrl+C 停止")
+        # 保持运行
+        await manager.user.run_until_disconnected()
+    except KeyboardInterrupt:
+        print("\n正在停止...")
+    finally:
+        history.close()
+        await manager.stop()
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    _setup_logging(args.verbose)
+    config = load_config(args.config)
+
+    if args.command == "download":
+        asyncio.run(_cmd_download(args, config))
+    elif args.command == "serve":
+        asyncio.run(_cmd_serve(args, config))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.session
+*.session-journal
+config.yaml
+.env
+downloads/
+.venv/
+venv/
+.pytest_cache/
+
+downloads.db
+.trae/

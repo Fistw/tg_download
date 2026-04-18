@@ -1,0 +1,19 @@
+telegram:
+  api_id: 12345
+  api_hash: "your_api_hash"
+  bot_token: "your_bot_token"
+  session_name: "user_session"
+
+download:
+  output_dir: "./downloads"
+  max_concurrent: 3
+
+monitor:
+  channels: []
+  filters:
+    min_size_mb: 0
+    max_size_mb: 4096
+    keywords: []
+
+bot:
+  allowed_users: []
