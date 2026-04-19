@@ -157,7 +157,7 @@ async def start_reaction_monitor(
             if hasattr(event, "original_update"):
                 update = event.original_update
                 update_type = type(update).__name__
-                logger.debug(f"📨 收到 Raw 事件: {update_type}")
+                logger.info(f"📨 收到 Raw 事件: {update_type}")
 
             is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
             if not is_valid or msg_id is None or chat_id is None:
