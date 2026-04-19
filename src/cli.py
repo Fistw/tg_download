@@ -3,9 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import logging.handlers
+import os
 import sys
+from datetime import datetime, timedelta
+from pathlib import Path
 
-from .config import load_config
+from .config import AppConfig, load_config
 from .client import ClientManager
 from .downloader import download_by_link, download_range, DownloadQueue
 from .database import DownloadDB
@@ -15,13 +19,53 @@ from .reaction_monitor import start_reaction_monitor
 from .utils import parse_range, format_file_size
 
 
-def _setup_logging(verbose: bool = False) -> None:
+def _setup_logging(verbose: bool = False, config: AppConfig | None = None) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    
+    logger = logging.getLogger()
+    logger.setLevel(level)
+    
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+    logger.addHandler(console_handler)
+    
+    if config is not None:
+        log_dir = Path(config.logging.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        log_file = log_dir / config.logging.filename
+        max_bytes = config.logging.max_file_size_mb * 1024 * 1024
+        
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=30,
+            encoding="utf-8"
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+        logger.addHandler(file_handler)
+        
+        _cleanup_old_logs(log_dir, config.logging.retention_days)
+
+
+def _cleanup_old_logs(log_dir: Path, retention_days: int) -> None:
+    cutoff_date = datetime.now() - timedelta(days=retention_days)
+    
+    for log_file in log_dir.glob("*.log*"):
+        if log_file.is_file():
+            file_mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+            if file_mtime < cutoff_date:
+                try:
+                    log_file.unlink()
+                except Exception as e:
+                    logging.warning(f"无法删除旧日志文件 {log_file}: {e}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -42,7 +86,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # serve 子命令
     sv = sub.add_parser("serve", help="启动 Bot + 频道监控服务")
-    sv.add_argument("-v", "--verbose", action="store_true", help="启用详细日志")
     sv.add_argument("--no-bot", action="store_true", help="不启动 Bot")
     sv.add_argument("--no-monitor", action="store_true", help="不启动监控")
 
@@ -118,13 +161,12 @@ async def _cmd_serve(args, config) -> None:
 
 def main() -> None:
     parser = _build_parser()
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
     
-    # 优先使用子命令的 verbose 参数，如果没有再用主 parser 的
-    verbose_flag = getattr(args, "verbose", False) or args.verbose
-    _setup_logging(verbose_flag)
+    verbose_flag = args.verbose
     
     config = load_config(args.config)
+    _setup_logging(verbose_flag, config)
 
     if args.command == "download":
         asyncio.run(_cmd_download(args, config))

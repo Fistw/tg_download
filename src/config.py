@@ -42,11 +42,20 @@ class BotConfig:
 
 
 @dataclass
+class LoggingConfig:
+    log_dir: str = "./logs"
+    max_file_size_mb: int = 10
+    retention_days: int = 7
+    filename: str = "tg_download.log"
+
+
+@dataclass
 class AppConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     bot: BotConfig = field(default_factory=BotConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 def load_config(path: str | Path = "config.yaml") -> AppConfig:
@@ -89,4 +98,12 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         allowed_users=bot_raw.get("allowed_users", []),
     )
 
-    return AppConfig(telegram=telegram, download=download, monitor=monitor, bot=bot)
+    log_raw = raw.get("logging", {})
+    logging = LoggingConfig(
+        log_dir=log_raw.get("log_dir", "./logs"),
+        max_file_size_mb=int(log_raw.get("max_file_size_mb", 10)),
+        retention_days=int(log_raw.get("retention_days", 7)),
+        filename=log_raw.get("filename", "tg_download.log"),
+    )
+
+    return AppConfig(telegram=telegram, download=download, monitor=monitor, bot=bot, logging=logging)

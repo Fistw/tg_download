@@ -12,6 +12,7 @@ from src.config import (
     MonitorConfig,
     MonitorFilters,
     BotConfig,
+    LoggingConfig,
 )
 
 
@@ -34,6 +35,12 @@ class TestLoadConfigFromFile:
                 },
             },
             "bot": {"allowed_users": [111, 222]},
+            "logging": {
+                "log_dir": "/tmp/logs",
+                "max_file_size_mb": 50,
+                "retention_days": 30,
+                "filename": "app.log",
+            },
         }
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(yaml.dump(cfg_data))
@@ -52,6 +59,10 @@ class TestLoadConfigFromFile:
         assert config.monitor.filters.max_size_mb == 2048
         assert config.monitor.filters.keywords == ["keyword1"]
         assert config.bot.allowed_users == [111, 222]
+        assert config.logging.log_dir == "/tmp/logs"
+        assert config.logging.max_file_size_mb == 50
+        assert config.logging.retention_days == 30
+        assert config.logging.filename == "app.log"
 
     def test_load_missing_file_returns_defaults(self, tmp_path):
         config = load_config(tmp_path / "nonexistent.yaml")
@@ -61,6 +72,10 @@ class TestLoadConfigFromFile:
         assert config.download.max_concurrent == 3
         assert config.monitor.channels == []
         assert config.bot.allowed_users == []
+        assert config.logging.log_dir == "./logs"
+        assert config.logging.max_file_size_mb == 10
+        assert config.logging.retention_days == 7
+        assert config.logging.filename == "tg_download.log"
 
     def test_load_empty_file_returns_defaults(self, tmp_path):
         cfg_file = tmp_path / "empty.yaml"
@@ -125,3 +140,40 @@ class TestEnvOverride:
         config = load_config(tmp_path / "missing.yaml")
         assert config.telegram.api_id == 77777
         assert config.telegram.api_hash == "env_hash"
+
+
+class TestLoggingConfig:
+    def test_logging_config_defaults(self):
+        log_config = LoggingConfig()
+        assert log_config.log_dir == "./logs"
+        assert log_config.max_file_size_mb == 10
+        assert log_config.retention_days == 7
+        assert log_config.filename == "tg_download.log"
+
+    def test_logging_config_custom_values(self):
+        log_config = LoggingConfig(
+            log_dir="/var/log/app",
+            max_file_size_mb=100,
+            retention_days=14,
+            filename="custom.log"
+        )
+        assert log_config.log_dir == "/var/log/app"
+        assert log_config.max_file_size_mb == 100
+        assert log_config.retention_days == 14
+        assert log_config.filename == "custom.log"
+
+    def test_load_partial_logging_config(self, tmp_path):
+        cfg_data = {
+            "logging": {
+                "log_dir": "/custom/logs",
+                "filename": "partial.log"
+            }
+        }
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(yaml.dump(cfg_data))
+
+        config = load_config(cfg_file)
+        assert config.logging.log_dir == "/custom/logs"
+        assert config.logging.max_file_size_mb == 10
+        assert config.logging.retention_days == 7
+        assert config.logging.filename == "partial.log"

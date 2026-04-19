@@ -19,3 +19,9 @@ monitor:
 
 bot:
   allowed_users: []
+
+logging:
+  log_dir: "./logs"
+  max_file_size_mb: 10
+  retention_days: 7
+  filename: "tg_download.log"

@@ -9,6 +9,7 @@ build/
 config.yaml
 .env
 downloads/
+logs/
 .venv/
 venv/
 .pytest_cache/
