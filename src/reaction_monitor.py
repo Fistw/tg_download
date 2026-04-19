@@ -14,16 +14,21 @@ from .downloader import DownloadQueue, download_message
 logger = logging.getLogger(__name__)
 
 
-def _is_valid_reaction_event(event) -> tuple[bool, Optional[int], Optional[str]]:
+def _is_valid_reaction_event(event_or_update) -> tuple[bool, Optional[int], Optional[str]]:
     """
     判断 Raw 事件是否是我们关心的点赞事件。
     返回 (is_valid, msg_id, chat_id)
     """
-    # 检查是否是 UpdateMessageReactions
-    if not hasattr(event, "original_update"):
-        return False, None, None
+    # 兼容两种格式：
+    # 1. 有的是 event 对象，里面有 event.original_update
+    # 2. 有的直接就是 update 对象！
+    update = None
+    if hasattr(event_or_update, "original_update"):
+        update = event_or_update.original_update
+    else:
+        update = event_or_update
 
-    update = event.original_update
+    # 检查是否是 UpdateMessageReactions
     if not isinstance(update, UpdateMessageReactions):
         return False, None, None
 
@@ -125,23 +130,29 @@ async def start_reaction_monitor(
         history = DownloadDB()
 
     @client.on(events.Raw())
-    async def on_raw_update(event):
+    async def on_raw_update(event_or_update):
         """监听 Raw 事件，查找反应更新"""
         try:
             # 💥 超详细调试：打印所有 Raw 事件完整信息！
-            if hasattr(event, "original_update"):
-                update = event.original_update
-                update_type = type(update).__name__
-                logger.info(f"📨 收到 Raw 事件: {update_type}")
+            obj_type = type(event_or_update).__name__
+            logger.info(f"📨 收到 Raw 事件/Update: {obj_type}")
+            logger.debug(f"📋 内容: {event_or_update}")
+            
+            # 提取 update 对象
+            update = None
+            if hasattr(event_or_update, "original_update"):
+                update = event_or_update.original_update
+            else:
+                update = event_or_update
 
-            is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
+            is_valid, msg_id, chat_id = _is_valid_reaction_event(event_or_update)
             if not is_valid or msg_id is None or chat_id is None:
                 return
 
             logger.info(f"🎯 识别到 Reaction 事件: {chat_id}/{msg_id}")
 
             # 检查是否是自己的点赞
-            is_own, _ = await _is_own_reaction(client, event.original_update, msg_id)
+            is_own, _ = await _is_own_reaction(client, update, msg_id)
             if not is_own:
                 logger.debug("❌ 不是自己的点赞或不是 👍，跳过")
                 return
