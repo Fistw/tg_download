@@ -51,77 +51,29 @@ async def _is_own_reaction(client: TelegramClient, update, msg_id) -> tuple[bool
     判断是否是自己添加的反应（点赞）
     返回 (是否是自己点赞, 可能的讨论组ID)
     """
-    if not hasattr(update, "peer"):
+    if not hasattr(update, "reactions"):
         return False, None
     
-    me = await client.get_me()
-    my_id = me.id if me else -1
-    logger.debug(f"自己的用户 ID: {my_id}")
+    reactions = update.reactions
+    logger.info(f"📋 reactions.results: {getattr(reactions, 'results', [])}")
     
-    # 方法 1：尝试用 recent_reactions（可能为空）
-    if hasattr(update, "reactions"):
-        reactions = update.reactions
-        if hasattr(reactions, "recent_reactions") and reactions.recent_reactions:
-            for r in reactions.recent_reactions:
-                if (
-                    (hasattr(r, "user_id") and r.user_id == my_id) or
-                    (hasattr(r, "peer_id") and hasattr(r.peer_id, "user_id") and r.peer_id.user_id == my_id)
-                ):
-                    if hasattr(r, "reaction") and isinstance(r.reaction, ReactionEmoji) and r.reaction.emoticon == "👍":
-                        logger.info("✅ 通过 recent_reactions 找到自己的点赞!")
+    if not hasattr(reactions, "results"):
+        return False, None
+    
+    for rc in reactions.results:
+        logger.debug(f"ReactionCount: {repr(rc)}")
+        if hasattr(rc, "chosen_order") and rc.chosen_order is not None:
+            # chosen_order 不是 None，说明是我们自己的反应！
+            logger.info(f"🎯 找到 chosen_order={rc.chosen_order}，是我们自己的反应！")
+            if hasattr(rc, "reaction"):
+                if isinstance(rc.reaction, ReactionEmoji):
+                    emoji = rc.reaction.emoticon
+                    logger.info(f"😄 Emoji: {emoji}")
+                    if emoji == "👍":
+                        logger.info("✅ 找到了我们自己的👍点赞！")
                         return True, None
-    
-    # 方法 2：recent_reactions 为空，主动查询这条消息的完整反应列表！
-    logger.info("🔍 recent_reactions 为空，主动查询完整反应列表...")
-    try:
-        from telethon.tl.functions.messages import GetMessageReactionsListRequest
-        peer = update.peer
-        result = await client(GetMessageReactionsListRequest(
-            peer=peer,
-            msg_id=msg_id,
-            limit=100
-        ))
-        
-        logger.info(f"📋 GetMessageReactionsListRequest 返回: {type(result)}")
-        logger.info(f"📋 所有属性: {dir(result)}")
-        
-        # 尝试可能的字段
-        reaction_list = []
-        if hasattr(result, "reactions"):
-            reaction_list = result.reactions
-        elif hasattr(result, "updates"):
-            logger.info(f"找到 updates 字段")
-            reaction_list = []
-            for upd in result.updates:
-                logger.debug(f"update: {type(upd)}, {repr(upd)}")
-        elif hasattr(result, "count"):
-            logger.info(f"count 字段: {result.count}")
-        else:
-            logger.warning(f"没有找到已知字段")
-        
-        logger.info(f"查询结果: {len(reaction_list)} 条反应")
-        
-        # 在返回的列表中找我们自己的 👍
-        for i, r in enumerate(reaction_list):
-            logger.debug(f"Reaction [{i}]: {type(r)}, {repr(r)}")
-            user_match = False
-            if hasattr(r, "user_id") and r.user_id == my_id:
-                user_match = True
-                logger.debug(f"✅ 通过 user_id 匹配")
-            elif hasattr(r, "peer_id") and hasattr(r.peer_id, "user_id") and r.peer_id.user_id == my_id:
-                user_match = True
-                logger.debug(f"✅ 通过 peer_id.user_id 匹配")
-            
-            if user_match:
-                if hasattr(r, "reaction"):
-                    logger.debug(f"反应类型: {type(r.reaction)}")
-                    if isinstance(r.reaction, ReactionEmoji):
-                        logger.debug(f"Emoji: {r.reaction.emoticon}")
-                        if r.reaction.emoticon == "👍":
-                            logger.info("✅ 通过 GetMessageReactionsListRequest 找到自己的点赞!")
-                            return True, None
-    except Exception as e:
-        logger.exception(f"主动查询反应列表失败: {e}")
+                else:
+                    logger.debug(f"不是 ReactionEmoji: {type(rc.reaction)}")
     
     return False, None
 
