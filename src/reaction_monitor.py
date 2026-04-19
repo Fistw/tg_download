@@ -141,8 +141,10 @@ async def start_reaction_monitor(
 ) -> None:
     """启动 Reaction 监控"""
     if not config.download.enable_reaction_download:
-        logger.info("Reaction 下载功能未启用")
+        logger.warning("⚠️ Reaction 下载功能未启用（config.yaml 里 download.enable_reaction_download 不是 True）")
         return
+
+    logger.info("✅ Reaction 下载功能已启用！")
 
     if history is None:
         history = DownloadDB()
@@ -151,51 +153,51 @@ async def start_reaction_monitor(
     async def on_raw_update(event):
         """监听 Raw 事件，查找反应更新"""
         try:
-            # 💥 超详细调试：打印所有 Raw 事件完整信息
+            # 💥 超详细调试：打印所有 Raw 事件完整信息！
             if hasattr(event, "original_update"):
                 update = event.original_update
                 update_type = type(update).__name__
-                logger.info(f"📨 收到 Raw 事件: {update_type}")
+                logger.debug(f"📨 收到 Raw 事件: {update_type}")
 
             is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
             if not is_valid or msg_id is None or chat_id is None:
                 return
 
-            logger.info(f"识别到 Reaction 事件: {chat_id}/{msg_id}")
+            logger.info(f"🎯 识别到 Reaction 事件: {chat_id}/{msg_id}")
 
             # 检查是否是自己的点赞
             is_own, _ = await _is_own_reaction(client, event.original_update, msg_id)
             if not is_own:
-                logger.debug("不是自己的点赞或不是 👍，跳过")
+                logger.debug("❌ 不是自己的点赞或不是 👍，跳过")
                 return
 
-            logger.info(f"检测到自己的点赞事件: {chat_id}/{msg_id}")
+            logger.info(f"💖 检测到自己的点赞事件: {chat_id}/{msg_id}")
 
             # 获取消息
             msg, final_chat_id = await _get_message_from_chat(client, chat_id, msg_id)
             if msg is None:
-                logger.warning(f"未找到消息: {final_chat_id}/{msg_id}")
+                logger.warning(f"⚠️ 未找到消息: {final_chat_id}/{msg_id}")
                 return
 
             # 检查是否是视频
             from .downloader import _is_video
             if not _is_video(msg):
-                logger.debug(f"被点赞消息不含视频: {final_chat_id}/{msg_id}")
+                logger.debug(f"⚠️ 被点赞消息不含视频: {final_chat_id}/{msg_id}")
                 return
 
-            logger.info(f"识别到视频消息: {final_chat_id}/{msg_id}")
+            logger.info(f"🎥 识别到视频消息: {final_chat_id}/{msg_id}")
 
             # 检查是否已下载过
             channel_str = str(final_chat_id)
             if history.is_downloaded(channel_str, msg.id):
-                logger.info(f"视频已下载过，跳过: {channel_str}/{msg.id}")
+                logger.info(f"✅ 视频已下载过，跳过: {channel_str}/{msg.id}")
                 return
 
             # 提交下载任务
-            logger.info(f"开始下载点赞的视频: {channel_str}/{msg.id}")
+            logger.info(f"⬇️ 开始下载点赞的视频: {channel_str}/{msg.id}")
             task_id = history.create_task(channel_str, msg.id, source="reaction")
             if task_id == -1:
-                logger.info("任务已存在，跳过")
+                logger.info("⏭️ 任务已存在，跳过")
                 return
 
             try:
@@ -210,20 +212,20 @@ async def start_reaction_monitor(
                         filename=path.name,
                         file_size=file_size
                     )
-                    logger.info(f"下载完成: {path}")
+                    logger.info(f"🎉 下载完成: {path}")
                 else:
                     history.update_status(channel_str, msg.id, "completed")
             except Exception as e:
-                logger.exception(f"下载失败: {channel_str}/{msg.id}")
+                logger.exception(f"❌ 下载失败: {channel_str}/{msg.id}")
                 history.update_status(
                     channel_str, msg.id, "failed", error_message=str(e)
                 )
         except Exception as e:
-            logger.exception(f"处理 Reaction 事件异常: {e}")
+            logger.exception(f"💥 处理 Reaction 事件异常: {e}")
 
     # 关键！先调用 get_dialogs 刷新会话缓存，确保能接收事件！
     logger.info("📞 调用 get_dialogs() 刷新会话...")
     dialogs = await client.get_dialogs(limit=10)
     logger.info(f"✅ 已获取 {len(dialogs)} 个会话！")
     
-    logger.info("Reaction 监控已启动，等待点赞...")
+    logger.info("🚀 Reaction 监控已启动，等待点赞中...")
