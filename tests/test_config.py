@@ -24,7 +24,7 @@ class TestLoadConfigFromFile:
                 "bot_token": "test_token",
                 "session_name": "my_session",
             },
-            "download": {"output_dir": "/tmp/dl", "max_concurrent": 5},
+            "download": {"output_dir": "/tmp/dl", "max_concurrent": 5, "enable_reaction_download": True},
             "monitor": {
                 "channels": ["chan1", "chan2"],
                 "filters": {
@@ -46,6 +46,7 @@ class TestLoadConfigFromFile:
         assert config.telegram.session_name == "my_session"
         assert config.download.output_dir == "/tmp/dl"
         assert config.download.max_concurrent == 5
+        assert config.download.enable_reaction_download == True
         assert config.monitor.channels == ["chan1", "chan2"]
         assert config.monitor.filters.min_size_mb == 10
         assert config.monitor.filters.max_size_mb == 2048

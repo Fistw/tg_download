@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+from telethon import TelegramClient, events
+from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
+
+from .config import AppConfig
+from .database import DownloadDB
+from .downloader import DownloadQueue, download_message
+
+logger = logging.getLogger(__name__)
+
+
+def _is_valid_reaction_event(event) -> tuple[bool, Optional[int], Optional[str]]:
+    """
+    判断 Raw 事件是否是我们关心的点赞事件。
+    返回 (is_valid, msg_id, chat_id)
+    """
+    # 检查是否是 UpdateMessageReactions
+    if not hasattr(event, "original_update"):
+        return False, None, None
+
+    update = event.original_update
+    if not isinstance(update, UpdateMessageReactions):
+        return False, None, None
+
+    # 获取消息 ID
+    msg_id = update.msg_id
+    if not msg_id:
+        return False, None, None
+
+    # 检查 Peer 类型，获取 Chat ID
+    chat_id = None
+    if hasattr(update, "peer"):
+        peer = update.peer
+        if hasattr(peer, "channel_id"):
+            chat_id = f"-100{peer.channel_id}"
+        elif hasattr(peer, "chat_id"):
+            chat_id = f"-{peer.chat_id}" if peer.chat_id > 0 else str(peer.chat_id)
+        elif hasattr(peer, "user_id"):
+            chat_id = str(peer.user_id)
+
+    return True, msg_id, chat_id
+
+
+async def _is_own_reaction(client: TelegramClient, update) -> bool:
+    """判断是否是自己添加的反应（点赞）"""
+    if not hasattr(update, "reactions"):
+        return False
+
+    reactions = update.reactions
+    if not hasattr(reactions, "recent_reactions"):
+        return False
+
+    # 获取自己的用户 ID
+    me = await client.get_me()
+    my_id = me.id if me else -1
+
+    # 检查最近的反应是否来自自己
+    recent_reactions = reactions.recent_reactions
+    if recent_reactions:
+        # 只检查最新添加的反应
+        latest_reaction = recent_reactions[-1]
+        if hasattr(latest_reaction, "user_id") and latest_reaction.user_id == my_id:
+            # 检查是否是 👍 emoji
+            if hasattr(latest_reaction, "reaction"):
+                reaction = latest_reaction.reaction
+                if (
+                    isinstance(reaction, ReactionEmoji)
+                    and reaction.emoticon == "👍"
+                ):
+                    return True
+        elif hasattr(latest_reaction, "peer_id"):
+            peer = latest_reaction.peer_id
+            if hasattr(peer, "user_id") and peer.user_id == my_id:
+                if hasattr(latest_reaction, "reaction"):
+                    reaction = latest_reaction.reaction
+                    if (
+                        isinstance(reaction, ReactionEmoji)
+                        and reaction.emoticon == "👍"
+                    ):
+                        return True
+
+    return False
+
+
+async def _get_message_from_chat(
+    client: TelegramClient, chat: str | int, msg_id: int
+):
+    """从指定聊天中获取消息"""
+    try:
+        # 先尝试直接获取
+        msg = await client.get_messages(chat, ids=msg_id)
+        if msg:
+            return msg, chat
+
+        # 失败的话，可能是讨论组，尝试获取主频道信息并找到 linked_chat
+        from telethon.tl.functions.channels import GetFullChannelRequest
+
+        # 先获取主频道（假设传入的是主频道）
+        main_chat = await client.get_entity(chat)
+        full_channel = await client(GetFullChannelRequest(main_chat))
+
+        if (
+            hasattr(full_channel, "full_chat")
+            and hasattr(full_channel.full_chat, "linked_chat_id")
+            and full_channel.full_chat.linked_chat_id
+        ):
+            # 使用 linked_chat_id 获取讨论组消息
+            linked_chat = int(f"-100{full_channel.full_chat.linked_chat_id}")
+            msg = await client.get_messages(linked_chat, ids=msg_id)
+            return msg, linked_chat
+        else:
+            return None, chat
+    except Exception as e:
+        logger.warning(f"获取消息失败: {chat}/{msg_id}, 错误: {e}")
+        return None, chat
+
+
+async def start_reaction_monitor(
+    client: TelegramClient,
+    config: AppConfig,
+    download_queue: DownloadQueue,
+    history: DownloadDB | None = None,
+) -> None:
+    """启动 Reaction 监控"""
+    if not config.download.enable_reaction_download:
+        logger.info("Reaction 下载功能未启用")
+        return
+
+    if history is None:
+        history = DownloadDB()
+
+    @client.on(events.Raw())
+    async def on_raw_update(event):
+        """监听 Raw 事件，查找反应更新"""
+        try:
+            is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
+            if not is_valid or msg_id is None or chat_id is None:
+                return
+
+            # 检查是否是自己的点赞
+            if not await _is_own_reaction(client, event.original_update):
+                return
+
+            logger.info(f"检测到点赞事件: {chat_id}/{msg_id}")
+
+            # 获取消息
+            msg, final_chat_id = await _get_message_from_chat(client, chat_id, msg_id)
+            if msg is None:
+                logger.warning(f"未找到消息: {final_chat_id}/{msg_id}")
+                return
+
+            # 检查是否是视频
+            from .downloader import _is_video
+            if not _is_video(msg):
+                logger.debug(f"被点赞消息不含视频: {final_chat_id}/{msg_id}")
+                return
+
+            # 检查是否已下载过
+            channel_str = str(final_chat_id)
+            if history.is_downloaded(channel_str, msg.id):
+                logger.info(f"视频已下载过，跳过: {channel_str}/{msg.id}")
+                return
+
+            # 提交下载任务
+            logger.info(f"开始下载点赞的视频: {channel_str}/{msg.id}")
+            task_id = history.create_task(channel_str, msg.id, source="reaction")
+            if task_id == -1:
+                logger.info("任务已存在，跳过")
+                return
+
+            try:
+                history.update_status(channel_str, msg.id, "downloading")
+                path = await download_message(client, msg, config.download.output_dir)
+                if path is not None:
+                    file_size = path.stat().st_size if path.exists() else None
+                    history.update_status(
+                        channel_str,
+                        msg.id,
+                        "completed",
+                        filename=path.name,
+                        file_size=file_size,
+                    )
+                    logger.info(f"下载完成: {path}")
+                else:
+                    history.update_status(channel_str, msg.id, "completed")
+            except Exception as e:
+                logger.exception(f"下载失败: {channel_str}/{msg.id}")
+                history.update_status(
+                    channel_str, msg.id, "failed", error_message=str(e)
+                )
+        except Exception as e:
+            logger.exception(f"处理 Reaction 事件异常: {e}")
+
+    logger.info("Reaction 监控已启动")

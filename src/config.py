@@ -19,6 +19,7 @@ class TelegramConfig:
 class DownloadConfig:
     output_dir: str = "./downloads"
     max_concurrent: int = 3
+    enable_reaction_download: bool = False
 
 
 @dataclass
@@ -67,6 +68,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     download = DownloadConfig(
         output_dir=dl_raw.get("output_dir", "./downloads"),
         max_concurrent=int(dl_raw.get("max_concurrent", 3)),
+        enable_reaction_download=bool(dl_raw.get("enable_reaction_download", False)),
     )
 
     mon_raw = raw.get("monitor", {})

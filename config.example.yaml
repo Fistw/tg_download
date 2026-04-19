@@ -7,6 +7,7 @@ telegram:
 download:
   output_dir: "./downloads"
   max_concurrent: 3
+  enable_reaction_download: false
 
 monitor:
   channels: []

@@ -7,10 +7,11 @@ import sys
 
 from .config import load_config
 from .client import ClientManager
-from .downloader import download_by_link, download_range
+from .downloader import download_by_link, download_range, DownloadQueue
 from .database import DownloadDB
 from .monitor import start_monitor
 from .bot_handler import setup_bot_handlers
+from .reaction_monitor import start_reaction_monitor
 from .utils import parse_range, format_file_size
 
 
@@ -87,11 +88,18 @@ async def _cmd_serve(args, config) -> None:
     await manager.start(start_bot=start_bot)
 
     history = DownloadDB()
+    download_queue = DownloadQueue(
+        manager.user, config.download.output_dir, history, config.download.max_concurrent
+    )
     try:
         if not args.no_monitor:
             await start_monitor(
                 manager.user, config.monitor, config.download.output_dir, history
             )
+
+        await start_reaction_monitor(
+            manager.user, config, download_queue, history
+        )
 
         if start_bot:
             await setup_bot_handlers(manager.bot, manager.user, config, history)

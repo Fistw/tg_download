@@ -9,6 +9,7 @@
 - **CLI 手动下载** — 通过链接或消息 ID 范围下载视频
 - **Bot 交互下载** — 在 Telegram 中发送链接即可触发下载
 - **频道自动监控** — 监听指定频道，自动下载新视频
+- **点赞自动下载** — 对视频消息点赞即可自动下载（支持主频道和评论）
 - **并发下载** — Semaphore 控制并发数，避免触发限流
 - **SQLite 任务管理** — 下载状态持久化，断点续传不丢失
 - **失败自动重试** — 网络异常自动重试，FloodWait 自动等待
@@ -47,6 +48,7 @@ telegram:
 download:
   output_dir: "./downloads"
   max_concurrent: 3
+  enable_reaction_download: false  # 是否启用点赞下载
 
 monitor:
   channels:
@@ -79,9 +81,22 @@ python -m src download "https://t.me/channel/123"
 # 批量下载
 python -m src download channel_name --range 100-200
 
-# 启动 Bot + 频道监控服务
+# 启动 Bot + 频道监控 + 点赞监控服务
 python -m src serve
 ```
+
+### 点赞下载功能
+
+将 `config.yaml` 中的 `enable_reaction_download` 设为 `true`：
+
+```yaml
+download:
+  enable_reaction_download: true
+```
+
+然后对包含视频的消息点赞，系统将自动下载！支持：
+- 主频道消息（如 `https://t.me/channel/123`）
+- 评论区消息（如 `https://t.me/channel/123?comment=456`）
 
 ### 一键部署
 
@@ -93,14 +108,15 @@ python -m src serve
 
 ```
 src/
-├── cli.py           # CLI 入口
-├── client.py        # Telegram 客户端管理
-├── config.py        # 配置加载
-├── database.py      # SQLite 任务管理
-├── downloader.py    # 下载核心逻辑
-├── monitor.py       # 频道监控
-├── bot_handler.py   # Bot 命令处理
-└── utils.py         # 工具函数
+├── cli.py             # CLI 入口
+├── client.py          # Telegram 客户端管理
+├── config.py          # 配置加载
+├── database.py        # SQLite 任务管理
+├── downloader.py      # 下载核心逻辑
+├── reaction_monitor.py # 点赞事件监控
+├── monitor.py         # 频道监控
+├── bot_handler.py     # Bot 命令处理
+└── utils.py           # 工具函数
 ```
 
 ## 许可证
