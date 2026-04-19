@@ -150,20 +150,33 @@ async def start_reaction_monitor(client: TelegramClient, config: load_config, do
                             if downloaded_paths:
                                 await bot_client.send_message(user_id, f"✅ 点赞视频下载完成！共 {len(downloaded_paths)} 个文件")
                                 logger.info(f"Sending {len(downloaded_paths)} files to user {user_id}...")
-                                # 逐个发送文件
+                                # 构建媒体文件列表
+                                media_files = []
+                                oversized_files = []
                                 for idx, path in enumerate(downloaded_paths, 1):
-                                    logger.info(f"  Sending file {idx}/{len(downloaded_paths)}: {path}")
+                                    logger.info(f"  Adding file {idx}/{len(downloaded_paths)}: {path}")
                                     if path and path.exists():
                                         file_size = path.stat().st_size
                                         logger.info(f"    File size: {file_size} bytes")
                                         if file_size < 2 * 1024 ** 3:
-                                            logger.info(f"    Starting upload...")
-                                            await bot_client.send_file(user_id, str(path))
-                                            logger.info(f"    ✅ File {idx}/{len(downloaded_paths)} sent successfully")
+                                            media_files.append(str(path))
                                         else:
-                                            await bot_client.send_message(user_id, f"文件太大（超过 2GB），路径: {path}")
+                                            oversized_files.append(str(path))
                                     else:
                                         logger.error(f"    ❌ File not found: {path}")
+                                
+                                # 使用 send_media_group 发送多个文件（最多10个一组）
+                                if media_files:
+                                    for i in range(0, len(media_files), 10):
+                                        batch = media_files[i:i+10]
+                                        logger.info(f"    Sending batch {i//10 + 1}, {len(batch)} files...")
+                                        await bot_client.send_file(user_id, batch)
+                                        logger.info(f"    ✅ Batch sent successfully")
+                                
+                                # 发送超大文件的通知
+                                for oversized_file in oversized_files:
+                                    await bot_client.send_message(user_id, f"文件太大（超过 2GB），路径: {oversized_file}")
+                                
                                 logger.info(f"✅ All files sent to user {user_id}")
                             else:
                                 await bot_client.send_message(user_id, "❌ 未找到视频文件")
