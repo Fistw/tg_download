@@ -100,7 +100,7 @@ async def _cmd_serve(args, config) -> None:
             )
 
         await start_reaction_monitor(
-            manager.user, config, download_queue, history
+            manager.user, config, download_queue, history, manager.bot if start_bot else None
         )
 
         if start_bot:

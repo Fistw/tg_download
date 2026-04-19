@@ -20,6 +20,7 @@ class DownloadConfig:
     output_dir: str = "./downloads"
     max_concurrent: int = 3
     enable_reaction_download: bool = False
+    send_download_to_allowed_users: bool = True
 
 
 @dataclass
@@ -69,6 +70,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         output_dir=dl_raw.get("output_dir", "./downloads"),
         max_concurrent=int(dl_raw.get("max_concurrent", 3)),
         enable_reaction_download=bool(dl_raw.get("enable_reaction_download", False)),
+        send_download_to_allowed_users=bool(dl_raw.get("send_download_to_allowed_users", True)),
     )
 
     mon_raw = raw.get("monitor", {})
