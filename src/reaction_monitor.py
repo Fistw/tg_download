@@ -149,14 +149,22 @@ async def start_reaction_monitor(client: TelegramClient, config: load_config, do
                         try:
                             if downloaded_paths:
                                 await bot_client.send_message(user_id, f"✅ 点赞视频下载完成！共 {len(downloaded_paths)} 个文件")
+                                logger.info(f"Sending {len(downloaded_paths)} files to user {user_id}...")
                                 # 逐个发送文件
-                                for path in downloaded_paths:
+                                for idx, path in enumerate(downloaded_paths, 1):
+                                    logger.info(f"  Sending file {idx}/{len(downloaded_paths)}: {path}")
                                     if path and path.exists():
                                         file_size = path.stat().st_size
+                                        logger.info(f"    File size: {file_size} bytes")
                                         if file_size < 2 * 1024 ** 3:
+                                            logger.info(f"    Starting upload...")
                                             await bot_client.send_file(user_id, str(path))
+                                            logger.info(f"    ✅ File {idx}/{len(downloaded_paths)} sent successfully")
                                         else:
                                             await bot_client.send_message(user_id, f"文件太大（超过 2GB），路径: {path}")
+                                    else:
+                                        logger.error(f"    ❌ File not found: {path}")
+                                logger.info(f"✅ All files sent to user {user_id}")
                             else:
                                 await bot_client.send_message(user_id, "❌ 未找到视频文件")
                         except Exception as e:
