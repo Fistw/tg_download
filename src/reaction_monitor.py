@@ -82,23 +82,46 @@ async def _is_own_reaction(client: TelegramClient, update, msg_id) -> tuple[bool
             limit=100
         ))
         
-        logger.debug(f"查询结果: {len(getattr(result, 'reactions', []))} 条反应")
+        logger.info(f"📋 GetMessageReactionsListRequest 返回: {type(result)}")
+        logger.info(f"📋 所有属性: {dir(result)}")
+        
+        # 尝试可能的字段
+        reaction_list = []
+        if hasattr(result, "reactions"):
+            reaction_list = result.reactions
+        elif hasattr(result, "updates"):
+            logger.info(f"找到 updates 字段")
+            reaction_list = []
+            for upd in result.updates:
+                logger.debug(f"update: {type(upd)}, {repr(upd)}")
+        elif hasattr(result, "count"):
+            logger.info(f"count 字段: {result.count}")
+        else:
+            logger.warning(f"没有找到已知字段")
+        
+        logger.info(f"查询结果: {len(reaction_list)} 条反应")
         
         # 在返回的列表中找我们自己的 👍
-        if hasattr(result, "reactions"):
-            for r in result.reactions:
-                user_match = False
-                if hasattr(r, "user_id") and r.user_id == my_id:
-                    user_match = True
-                elif hasattr(r, "peer_id") and hasattr(r.peer_id, "user_id") and r.peer_id.user_id == my_id:
-                    user_match = True
-                
-                if user_match:
-                    if hasattr(r, "reaction") and isinstance(r.reaction, ReactionEmoji) and r.reaction.emoticon == "👍":
-                        logger.info("✅ 通过 GetMessageReactionsListRequest 找到自己的点赞!")
-                        return True, None
+        for i, r in enumerate(reaction_list):
+            logger.debug(f"Reaction [{i}]: {type(r)}, {repr(r)}")
+            user_match = False
+            if hasattr(r, "user_id") and r.user_id == my_id:
+                user_match = True
+                logger.debug(f"✅ 通过 user_id 匹配")
+            elif hasattr(r, "peer_id") and hasattr(r.peer_id, "user_id") and r.peer_id.user_id == my_id:
+                user_match = True
+                logger.debug(f"✅ 通过 peer_id.user_id 匹配")
+            
+            if user_match:
+                if hasattr(r, "reaction"):
+                    logger.debug(f"反应类型: {type(r.reaction)}")
+                    if isinstance(r.reaction, ReactionEmoji):
+                        logger.debug(f"Emoji: {r.reaction.emoticon}")
+                        if r.reaction.emoticon == "👍":
+                            logger.info("✅ 通过 GetMessageReactionsListRequest 找到自己的点赞!")
+                            return True, None
     except Exception as e:
-        logger.warning(f"主动查询反应列表失败: {e}")
+        logger.exception(f"主动查询反应列表失败: {e}")
     
     return False, None
 
