@@ -135,15 +135,24 @@ async def download_by_link(
 
     # 如果是评论消息，需要从讨论组频道中获取
     if parsed.is_comment:
-        # 获取主频道实体
+        # 获取主频道的完整信息
+        from telethon.tl.functions.channels import GetFullChannelRequest
+        from telethon.tl.types import InputChannel
+        # 先获取主频道实体
         main_channel = await client.get_entity(entity)
-        # 讨论组频道 ID = 主频道 ID + 1000000
-        from telethon.tl.types import Channel
-        if isinstance(main_channel, Channel):
-            # 去掉 -100 前缀，加 1000000，再加回 -100
-            main_channel_id = abs(main_channel.id)
-            discussion_channel_id = main_channel_id + 1000000
-            entity = int(f"-100{discussion_channel_id}")
+        # 获取完整频道信息，其中包含讨论组
+        full_channel = await client(GetFullChannelRequest(main_channel))
+        # 检查是否有讨论组
+        if (
+            hasattr(full_channel, 'full_chat')
+            and hasattr(full_channel.full_chat, 'linked_chat_id')
+            and full_channel.full_chat.linked_chat_id
+        ):
+            # 使用正确的讨论组 ID
+            discussion_chat_id = full_channel.full_chat.linked_chat_id
+            entity = int(f"-100{discussion_chat_id}")
+            # 显式获取讨论组实体，确保它被缓存
+            await client.get_entity(entity)
 
     message = await client.get_messages(entity, ids=parsed.message_id)
 
