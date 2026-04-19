@@ -135,7 +135,8 @@ async def start_reaction_monitor(client: TelegramClient, config: load_config, do
 
                 logger.info("Downloading all videos in message!")
                 config_dir = config.download.output_dir
-                downloaded_paths = await download_all_videos_in_message(client, message, config_dir)
+                chunk_size = config.download.chunk_size_kb
+                downloaded_paths = await download_all_videos_in_message(client, message, config_dir, chunk_size_kb=chunk_size)
 
                 logger.info(f"✅ Download completed! Downloaded {len(downloaded_paths)} files")
 

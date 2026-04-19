@@ -18,7 +18,8 @@ class TelegramConfig:
 @dataclass
 class DownloadConfig:
     output_dir: str = "./downloads"
-    max_concurrent: int = 3
+    max_concurrent: int = 5
+    chunk_size_kb: int = 512
     enable_reaction_download: bool = False
     send_download_to_allowed_users: bool = True
 
@@ -77,7 +78,8 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     dl_raw = raw.get("download", {})
     download = DownloadConfig(
         output_dir=dl_raw.get("output_dir", "./downloads"),
-        max_concurrent=int(dl_raw.get("max_concurrent", 3)),
+        max_concurrent=int(dl_raw.get("max_concurrent", 5)),
+        chunk_size_kb=int(dl_raw.get("chunk_size_kb", 512)),
         enable_reaction_download=bool(dl_raw.get("enable_reaction_download", False)),
         send_download_to_allowed_users=bool(dl_raw.get("send_download_to_allowed_users", True)),
     )

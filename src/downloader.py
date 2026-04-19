@@ -57,18 +57,26 @@ async def _download_with_retry(
     message,
     file_path: Path,
     progress_callback: ProgressCallback = None,
+    chunk_size_kb: int = 512,
 ) -> Path:
-    """带重试逻辑的下载。"""
+    """带重试逻辑的下载，支持自定义块大小。"""
+    request_size = chunk_size_kb * 1024  # KB -> bytes
+    
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            result = await client.download_media(
-                message,
-                file=str(file_path),
-                progress_callback=progress_callback,
-            )
-            if result is None:
-                raise RuntimeError("下载返回 None，消息可能不包含可下载的媒体")
-            return Path(result)
+            # 使用 iter_download 并支持自定义 request_size 以提高速度
+            file_size = message.media.document.size if (message.media and message.media.document) else 0
+            downloaded = 0
+            with open(str(file_path), 'wb') as f:
+                async for chunk in client.iter_download(
+                    message,
+                    request_size=request_size,
+                ):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and file_size > 0:
+                        progress_callback(downloaded, file_size)
+            return file_path
         except FloodWaitError as e:
             logger.warning("触发 FloodWait，等待 %d 秒后重试 (第%d次)", e.seconds, attempt)
             await asyncio.sleep(e.seconds)
@@ -94,6 +102,7 @@ async def download_message(
     message,
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
+    chunk_size_kb: int = 512,
 ) -> Path | None:
     """下载单条消息中的视频媒体。如果消息不含视频则返回 None。"""
     if not _is_video(message):
@@ -115,7 +124,7 @@ async def download_message(
     total_size = message.media.document.size if message.media.document else 0
     logger.info("开始下载: %s (大小: %s)", filename, format_progress(0, total_size))
 
-    result = await _download_with_retry(client, message, file_path, progress_callback)
+    result = await _download_with_retry(client, message, file_path, progress_callback, chunk_size_kb)
     logger.info("下载完成: %s", result)
     return result
 
@@ -125,13 +134,14 @@ async def download_all_videos_in_message(
     message,
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
+    chunk_size_kb: int = 512,
 ) -> list[Path]:
     """下载一条消息里的所有视频（包括 grouped 的消息组）。"""
     downloaded: list[Path] = []
 
     # 先尝试下载本条消息的视频
     if _is_video(message):
-        path = await download_message(client, message, output_dir, progress_callback)
+        path = await download_message(client, message, output_dir, progress_callback, chunk_size_kb)
         if path:
             downloaded.append(path)
 
@@ -145,7 +155,7 @@ async def download_all_videos_in_message(
             nearby_messages = await client.get_messages(chat, ids=nearby_ids)
             for nearby_msg in nearby_messages:
                 if nearby_msg and nearby_msg.grouped_id == message.grouped_id and nearby_msg.id != message.id and _is_video(nearby_msg):
-                    path = await download_message(client, nearby_msg, output_dir, progress_callback)
+                    path = await download_message(client, nearby_msg, output_dir, progress_callback, chunk_size_kb)
                     if path:
                         downloaded.append(path)
         except Exception as e:
