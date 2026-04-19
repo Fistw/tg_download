@@ -106,6 +106,33 @@ async def start_reaction_monitor(client: TelegramClient, config: load_config, do
                     logger.error("Failed to get message")
                     return
 
+                # 构建消息链接
+                message_link = ""
+                if hasattr(update.peer, 'channel_id'):
+                    channel_id = update.peer.channel_id
+                    message_link = f"https://t.me/c/{channel_id}/{msg_id}"
+                elif hasattr(update.peer, 'chat_id'):
+                    chat_id = update.peer.chat_id
+                    message_link = f"https://t.me/{chat_id}/{msg_id}"
+                elif hasattr(update.peer, 'user_id'):
+                    user_id = update.peer.user_id
+                    message_link = f"https://t.me/{user_id}/{msg_id}"
+
+                # 立即发送点赞通知到 Bot
+                if (
+                    bot_client
+                    and config.download.send_download_to_allowed_users
+                    and config.bot.allowed_users
+                ):
+                    for user_id in config.bot.allowed_users:
+                        try:
+                            await bot_client.send_message(
+                                user_id,
+                                f"💖 检测到点赞！正在下载...\n{message_link}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to send notification to user {user_id}: {e}")
+
                 logger.info("Downloading all videos in message!")
                 config_dir = config.download.output_dir
                 downloaded_paths = await download_all_videos_in_message(client, message, config_dir)
