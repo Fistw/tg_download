@@ -36,6 +36,18 @@ class TestParseTelegramLink:
         assert result.channel == "-1009999"
         assert result.message_id == 100
 
+    def test_public_channel_link_with_comment(self):
+        result = parse_telegram_link("https://t.me/RSOOXX/1165?comment=512")
+        assert result == TelegramLink(channel="RSOOXX", message_id=512)
+
+    def test_private_channel_link_with_comment(self):
+        result = parse_telegram_link("https://t.me/c/1234567890/789?comment=456")
+        assert result == TelegramLink(channel="-1001234567890", message_id=456)
+
+    def test_public_channel_link_with_fragment(self):
+        result = parse_telegram_link("https://t.me/testchannel/456#hash")
+        assert result == TelegramLink(channel="testchannel", message_id=456)
+
 
 class TestParseRange:
     def test_valid_range(self):

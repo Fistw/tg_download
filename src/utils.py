@@ -24,17 +24,35 @@ def parse_telegram_link(url: str) -> TelegramLink:
 
     支持格式:
       - https://t.me/channel_name/123
+      - https://t.me/channel_name/123?comment=456（使用 comment ID）
       - https://t.me/c/1234567890/123 （私有频道）
+      - https://t.me/c/1234567890/123?comment=456（私有频道使用 comment ID）
     """
-    # 先尝试匹配私有频道格式，因为 /c/ 会被公有正则错误匹配为用户名 "c"
-    m = _PRIVATE_LINK_RE.match(url)
-    if m:
-        # 私有频道 ID 需要加上 -100 前缀转为 Telethon 的 peer id
-        return TelegramLink(channel=f"-100{m.group(1)}", message_id=int(m.group(2)))
+    from urllib.parse import urlparse, parse_qs
 
-    m = _PUBLIC_LINK_RE.match(url)
+    parsed_url = urlparse(url)
+    clean_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+
+    # 先尝试匹配私有频道格式，因为 /c/ 会被公有正则错误匹配为用户名 "c"
+    m = _PRIVATE_LINK_RE.match(clean_url)
     if m:
-        return TelegramLink(channel=m.group(1), message_id=int(m.group(2)))
+        channel = f"-100{m.group(1)}"
+        message_id = int(m.group(2))
+        # 检查是否有 comment 参数
+        qs = parse_qs(parsed_url.query)
+        if "comment" in qs:
+            message_id = int(qs["comment"][0])
+        return TelegramLink(channel=channel, message_id=message_id)
+
+    m = _PUBLIC_LINK_RE.match(clean_url)
+    if m:
+        channel = m.group(1)
+        message_id = int(m.group(2))
+        # 检查是否有 comment 参数
+        qs = parse_qs(parsed_url.query)
+        if "comment" in qs:
+            message_id = int(qs["comment"][0])
+        return TelegramLink(channel=channel, message_id=message_id)
 
     raise ValueError(f"无法解析 Telegram 链接: {url}")
 
