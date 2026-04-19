@@ -57,7 +57,7 @@ async def _download_with_retry(
     message,
     file_path: Path,
     progress_callback: ProgressCallback = None,
-    chunk_size_kb: int = 512,
+    chunk_size_kb: int = 2048,
 ) -> Path:
     """带重试逻辑的下载，支持自定义块大小。"""
     request_size = chunk_size_kb * 1024  # KB -> bytes
@@ -102,7 +102,7 @@ async def download_message(
     message,
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
-    chunk_size_kb: int = 512,
+    chunk_size_kb: int = 2048,
 ) -> Path | None:
     """下载单条消息中的视频媒体。如果消息不含视频则返回 None。"""
     if not _is_video(message):
@@ -134,7 +134,7 @@ async def download_all_videos_in_message(
     message,
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
-    chunk_size_kb: int = 512,
+    chunk_size_kb: int = 2048,
 ) -> list[Path]:
     """下载一条消息里的所有视频（包括 grouped 的消息组）。"""
     downloaded: list[Path] = []

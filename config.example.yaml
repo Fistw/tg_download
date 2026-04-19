@@ -7,7 +7,7 @@ telegram:
 download:
   output_dir: "./downloads"
   max_concurrent: 5  # 同时下载的最大文件数，建议 5-10
-  chunk_size_kb: 512  # 下载块大小（KB），建议 512 或 1024
+  chunk_size_kb: 2048  # 下载块大小（KB），建议 2048（最快）
   enable_reaction_download: false
   send_download_to_allowed_users: true
 

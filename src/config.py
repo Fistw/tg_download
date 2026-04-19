@@ -19,7 +19,7 @@ class TelegramConfig:
 class DownloadConfig:
     output_dir: str = "./downloads"
     max_concurrent: int = 5
-    chunk_size_kb: int = 512
+    chunk_size_kb: int = 2048
     enable_reaction_download: bool = False
     send_download_to_allowed_users: bool = True
 
