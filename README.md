@@ -10,7 +10,9 @@
 - **Bot 交互下载** — 在 Telegram 中发送链接即可触发下载
 - **频道自动监控** — 监听指定频道，自动下载新视频
 - **点赞自动下载** — 对视频消息点赞即可自动下载（支持主频道和评论）
+- **多视频支持** — 一条消息或媒体组中的多个视频全部下载并统一发送
 - **并发下载** — Semaphore 控制并发数，避免触发限流
+- **高速下载** — 支持自定义下载块大小，集成 cryptg 加密加速
 - **SQLite 任务管理** — 下载状态持久化，断点续传不丢失
 - **失败自动重试** — 网络异常自动重试，FloodWait 自动等待
 
@@ -21,6 +23,7 @@
 - Python 3.9+
 - 从 [my.telegram.org](https://my.telegram.org) 获取 `api_id` 和 `api_hash`
 - 从 [@BotFather](https://t.me/BotFather) 获取 Bot Token（可选，用于 Bot 交互）
+- **推荐安装** `pip install cryptg` (大幅提升下载和上传速度)
 
 ### 安装
 
@@ -28,6 +31,8 @@
 git clone https://github.com/Fistw/tg_download.git
 cd tg_download
 pip install -e .
+# 可选：安装加密加速库（推荐）
+pip install cryptg
 ```
 
 ### 配置
@@ -47,8 +52,10 @@ telegram:
 
 download:
   output_dir: "./downloads"
-  max_concurrent: 3
+  max_concurrent: 5  # 同时下载的最大文件数
+  chunk_size_kb: 2048  # 下载块大小（KB），推荐 2048（2MB）
   enable_reaction_download: false  # 是否启用点赞下载
+  send_download_to_allowed_users: true  # 是否将下载的文件发送给允许的用户
 
 monitor:
   channels:
@@ -61,7 +68,7 @@ monitor:
 
 bot:
   allowed_users:
-    - 123456789
+    - 123456789  # 允许使用 Bot 的用户 ID
 ```
 
 ### 首次登录
@@ -92,11 +99,13 @@ python -m src serve
 ```yaml
 download:
   enable_reaction_download: true
+  send_download_to_allowed_users: true
 ```
 
 然后对包含视频的消息点赞，系统将自动下载！支持：
 - 主频道消息（如 `https://t.me/channel/123`）
 - 评论区消息（如 `https://t.me/channel/123?comment=456`）
+- **媒体组消息**（一条消息包含多个视频）
 
 ### 一键部署
 
@@ -118,6 +127,14 @@ src/
 ├── bot_handler.py     # Bot 命令处理
 └── utils.py           # 工具函数
 ```
+
+## 速度优化建议
+
+为获得最佳性能，建议：
+
+1. **安装 cryptg 库**：`pip install cryptg`（C 语言实现的加密加速）
+2. **设置合适的 chunk size**：`chunk_size_kb: 2048`（2MB）
+3. **调整并发数**：`max_concurrent: 5`（根据网络情况调整）
 
 ## 许可证
 

@@ -48,6 +48,8 @@ check_python() {
     # 安装项目依赖
     echo "  安装项目依赖..."
     $PYTHON_CMD -m pip install -e "$PROJECT_DIR" --quiet
+    echo "  安装加密加速库 cryptg..."
+    $PYTHON_CMD -m pip install cryptg --quiet
     echo "  ✓ 项目依赖已安装"
     echo ""
 }
