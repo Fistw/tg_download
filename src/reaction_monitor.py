@@ -9,7 +9,7 @@ from telethon import TelegramClient, events
 from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
 
 from src.config import load_config
-from src.downloader import download_message
+from src.downloader import download_all_videos_in_message
 from src.downloader import _is_video as is_video_message
 
 logger = logging.getLogger(__name__)
@@ -106,15 +106,11 @@ async def start_reaction_monitor(client: TelegramClient, config: load_config, do
                     logger.error("Failed to get message")
                     return
 
-                if not is_video_message(message):
-                    logger.info("Not a video message, skipping")
-                    return
-
-                logger.info("Downloading video message!")
+                logger.info("Downloading all videos in message!")
                 config_dir = config.download.output_dir
-                downloaded_path = await download_message(client, message, config_dir)
+                downloaded_paths = await download_all_videos_in_message(client, message, config_dir)
 
-                logger.info("✅ Download completed!")
+                logger.info(f"✅ Download completed! Downloaded {len(downloaded_paths)} files")
 
                 # 如果需要发送给 bot 的允许用户
                 if (
@@ -124,15 +120,18 @@ async def start_reaction_monitor(client: TelegramClient, config: load_config, do
                 ):
                     for user_id in config.bot.allowed_users:
                         try:
-                            if downloaded_path and downloaded_path.exists():
-                                file_size = downloaded_path.stat().st_size
-                                if file_size < 2 * 1024 ** 3:
-                                    await bot_client.send_message(user_id, f"✅ 点赞视频下载完成！")
-                                    await bot_client.send_file(user_id, str(downloaded_path))
-                                else:
-                                    await bot_client.send_message(user_id, f"✅ 点赞视频下载完成！文件太大（超过 2GB），路径: {downloaded_path}")
+                            if downloaded_paths:
+                                await bot_client.send_message(user_id, f"✅ 点赞视频下载完成！共 {len(downloaded_paths)} 个文件")
+                                # 逐个发送文件
+                                for path in downloaded_paths:
+                                    if path and path.exists():
+                                        file_size = path.stat().st_size
+                                        if file_size < 2 * 1024 ** 3:
+                                            await bot_client.send_file(user_id, str(path))
+                                        else:
+                                            await bot_client.send_message(user_id, f"文件太大（超过 2GB），路径: {path}")
                             else:
-                                await bot_client.send_message(user_id, "❌ 点赞视频下载失败或未找到视频文件")
+                                await bot_client.send_message(user_id, "❌ 未找到视频文件")
                         except Exception as e:
                             logger.error(f"Failed to send message to user {user_id}: {e}")
                             import traceback
@@ -145,7 +144,7 @@ async def start_reaction_monitor(client: TelegramClient, config: load_config, do
                 if bot_client and config.download.send_download_to_allowed_users and config.bot.allowed_users:
                     for user_id in config.bot.allowed_users:
                         try:
-                            await bot_client.send_message(user_id, f"❌ 点赞视频下载失败: {e}")
+                            await bot_client.send_message(user_id, f"❌ 下载失败: {e}")
                         except:
                             pass
 

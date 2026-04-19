@@ -120,6 +120,47 @@ async def download_message(
     return result
 
 
+async def download_all_videos_in_message(
+    client: TelegramClient,
+    message,
+    output_dir: str | Path,
+    progress_callback: ProgressCallback = None,
+) -> list[Path]:
+    """下载一条消息里的所有视频（包括 grouped 的消息组）。"""
+    downloaded: list[Path] = []
+
+    # 先尝试下载本条消息的视频
+    if _is_video(message):
+        path = await download_message(client, message, output_dir, progress_callback)
+        if path:
+            downloaded.append(path)
+
+    # 检查是否有 grouped_id，下载同组里的其他消息
+    if hasattr(message, "grouped_id") and message.grouped_id:
+        try:
+            chat = await message.get_input_chat()
+            # 获取同组的所有消息
+            # 首先获取大概范围（message.id 附近）
+            nearby_ids = list(range(message.id - 20, message.id + 20))
+            nearby_messages = await client.get_messages(chat, ids=nearby_ids)
+            for nearby_msg in nearby_messages:
+                if nearby_msg and nearby_msg.grouped_id == message.grouped_id and nearby_msg.id != message.id and _is_video(nearby_msg):
+                    path = await download_message(client, nearby_msg, output_dir, progress_callback)
+                    if path:
+                        downloaded.append(path)
+        except Exception as e:
+            logger.warning(f"获取 grouped 消息失败: {e}")
+
+    # 去重（避免重复下载）
+    unique_downloaded = []
+    seen_paths = set()
+    for p in downloaded:
+        if p and str(p) not in seen_paths:
+            unique_downloaded.append(p)
+            seen_paths.add(str(p))
+    return unique_downloaded
+
+
 async def download_by_link(
     client: TelegramClient,
     link: str,
