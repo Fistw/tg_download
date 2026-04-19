@@ -28,6 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tg-download",
         description="下载 Telegram 频道中受限制的视频文件",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("-v", "--verbose", action="store_true", help="启用详细日志")
@@ -41,6 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # serve 子命令
     sv = sub.add_parser("serve", help="启动 Bot + 频道监控服务")
+    sv.add_argument("-v", "--verbose", action="store_true", help="启用详细日志")
     sv.add_argument("--no-bot", action="store_true", help="不启动 Bot")
     sv.add_argument("--no-monitor", action="store_true", help="不启动监控")
 
@@ -117,7 +119,11 @@ async def _cmd_serve(args, config) -> None:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
-    _setup_logging(args.verbose)
+    
+    # 优先使用子命令的 verbose 参数，如果没有再用主 parser 的
+    verbose_flag = getattr(args, "verbose", False) or args.verbose
+    _setup_logging(verbose_flag)
+    
     config = load_config(args.config)
 
     if args.command == "download":
