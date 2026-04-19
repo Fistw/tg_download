@@ -23,7 +23,7 @@ logger = logging.getLogger("test_reaction")
 async def main():
     # 加载配置
     config = load_config()
-    session_path = Path(config.session_name)
+    session_path = Path(config.telegram.session_name)
 
     # 创建客户端
     client = TelegramClient(
