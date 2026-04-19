@@ -221,4 +221,9 @@ async def start_reaction_monitor(
         except Exception as e:
             logger.exception(f"处理 Reaction 事件异常: {e}")
 
+    # 关键！先调用 get_dialogs 刷新会话缓存，确保能接收事件！
+    logger.info("📞 调用 get_dialogs() 刷新会话...")
+    dialogs = await client.get_dialogs(limit=10)
+    logger.info(f"✅ 已获取 {len(dialogs)} 个会话！")
+    
     logger.info("Reaction 监控已启动，等待点赞...")
