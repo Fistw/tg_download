@@ -46,45 +46,61 @@ def _is_valid_reaction_event(event) -> tuple[bool, Optional[int], Optional[str]]
     return True, msg_id, chat_id
 
 
-async def _is_own_reaction(client: TelegramClient, update) -> bool:
-    """判断是否是自己添加的反应（点赞）"""
-    if not hasattr(update, "reactions"):
-        return False
-
-    reactions = update.reactions
-    if not hasattr(reactions, "recent_reactions"):
-        return False
-
-    # 获取自己的用户 ID
+async def _is_own_reaction(client: TelegramClient, update, msg_id) -> tuple[bool, str | None]:
+    """
+    判断是否是自己添加的反应（点赞）
+    返回 (是否是自己点赞, 可能的讨论组ID)
+    """
+    if not hasattr(update, "peer"):
+        return False, None
+    
     me = await client.get_me()
     my_id = me.id if me else -1
-
-    # 检查最近的反应是否来自自己
-    recent_reactions = reactions.recent_reactions
-    if recent_reactions:
-        # 只检查最新添加的反应
-        latest_reaction = recent_reactions[-1]
-        if hasattr(latest_reaction, "user_id") and latest_reaction.user_id == my_id:
-            # 检查是否是 👍 emoji
-            if hasattr(latest_reaction, "reaction"):
-                reaction = latest_reaction.reaction
+    logger.debug(f"自己的用户 ID: {my_id}")
+    
+    # 方法 1：尝试用 recent_reactions（可能为空）
+    if hasattr(update, "reactions"):
+        reactions = update.reactions
+        if hasattr(reactions, "recent_reactions") and reactions.recent_reactions:
+            for r in reactions.recent_reactions:
                 if (
-                    isinstance(reaction, ReactionEmoji)
-                    and reaction.emoticon == "👍"
+                    (hasattr(r, "user_id") and r.user_id == my_id) or
+                    (hasattr(r, "peer_id") and hasattr(r.peer_id, "user_id") and r.peer_id.user_id == my_id)
                 ):
-                    return True
-        elif hasattr(latest_reaction, "peer_id"):
-            peer = latest_reaction.peer_id
-            if hasattr(peer, "user_id") and peer.user_id == my_id:
-                if hasattr(latest_reaction, "reaction"):
-                    reaction = latest_reaction.reaction
-                    if (
-                        isinstance(reaction, ReactionEmoji)
-                        and reaction.emoticon == "👍"
-                    ):
-                        return True
-
-    return False
+                    if hasattr(r, "reaction") and isinstance(r.reaction, ReactionEmoji) and r.reaction.emoticon == "👍":
+                        logger.info("✅ 通过 recent_reactions 找到自己的点赞!")
+                        return True, None
+    
+    # 方法 2：recent_reactions 为空，主动查询这条消息的完整反应列表！
+    logger.info("🔍 recent_reactions 为空，主动查询完整反应列表...")
+    try:
+        from telethon.tl.functions.messages import GetMessageReactionsListRequest
+        peer = update.peer
+        result = await client(GetMessageReactionsListRequest(
+            peer=peer,
+            msg_id=msg_id,
+            limit=100
+        ))
+        
+        logger.debug(f"查询结果: {len(getattr(result, 'reactions', []))} 条反应")
+        
+        # 在返回的列表中找我们自己的 👍
+        if hasattr(result, "reactions"):
+            for r in result.reactions:
+                user_match = False
+                if hasattr(r, "user_id") and r.user_id == my_id:
+                    user_match = True
+                elif hasattr(r, "peer_id") and hasattr(r.peer_id, "user_id") and r.peer_id.user_id == my_id:
+                    user_match = True
+                
+                if user_match:
+                    if hasattr(r, "reaction") and isinstance(r.reaction, ReactionEmoji) and r.reaction.emoticon == "👍":
+                        logger.info("✅ 通过 GetMessageReactionsListRequest 找到自己的点赞!")
+                        return True, None
+    except Exception as e:
+        logger.warning(f"主动查询反应列表失败: {e}")
+    
+    return False, None
 
 
 async def _get_message_from_chat(
@@ -97,10 +113,8 @@ async def _get_message_from_chat(
         if msg:
             return msg, chat
 
-        # 失败的话，可能是讨论组，尝试获取主频道信息并找到 linked_chat
+        # 失败的话，可能是讨论组，尝试获取主频道完整信息并找到 linked_chat
         from telethon.tl.functions.channels import GetFullChannelRequest
-
-        # 先获取主频道（假设传入的是主频道）
         main_chat = await client.get_entity(chat)
         full_channel = await client(GetFullChannelRequest(main_chat))
 
@@ -109,7 +123,6 @@ async def _get_message_from_chat(
             and hasattr(full_channel.full_chat, "linked_chat_id")
             and full_channel.full_chat.linked_chat_id
         ):
-            # 使用 linked_chat_id 获取讨论组消息
             linked_chat = int(f"-100{full_channel.full_chat.linked_chat_id}")
             msg = await client.get_messages(linked_chat, ids=msg_id)
             return msg, linked_chat
@@ -138,15 +151,25 @@ async def start_reaction_monitor(
     async def on_raw_update(event):
         """监听 Raw 事件，查找反应更新"""
         try:
+            # 💥 超详细调试：打印所有 Raw 事件完整信息
+            if hasattr(event, "original_update"):
+                update = event.original_update
+                update_type = type(update).__name__
+                logger.info(f"📨 收到 Raw 事件: {update_type}")
+
             is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
             if not is_valid or msg_id is None or chat_id is None:
                 return
 
+            logger.info(f"识别到 Reaction 事件: {chat_id}/{msg_id}")
+
             # 检查是否是自己的点赞
-            if not await _is_own_reaction(client, event.original_update):
+            is_own, _ = await _is_own_reaction(client, event.original_update, msg_id)
+            if not is_own:
+                logger.debug("不是自己的点赞或不是 👍，跳过")
                 return
 
-            logger.info(f"检测到点赞事件: {chat_id}/{msg_id}")
+            logger.info(f"检测到自己的点赞事件: {chat_id}/{msg_id}")
 
             # 获取消息
             msg, final_chat_id = await _get_message_from_chat(client, chat_id, msg_id)
@@ -159,6 +182,8 @@ async def start_reaction_monitor(
             if not _is_video(msg):
                 logger.debug(f"被点赞消息不含视频: {final_chat_id}/{msg_id}")
                 return
+
+            logger.info(f"识别到视频消息: {final_chat_id}/{msg_id}")
 
             # 检查是否已下载过
             channel_str = str(final_chat_id)
@@ -183,7 +208,7 @@ async def start_reaction_monitor(
                         msg.id,
                         "completed",
                         filename=path.name,
-                        file_size=file_size,
+                        file_size=file_size
                     )
                     logger.info(f"下载完成: {path}")
                 else:
@@ -196,4 +221,4 @@ async def start_reaction_monitor(
         except Exception as e:
             logger.exception(f"处理 Reaction 事件异常: {e}")
 
-    logger.info("Reaction 监控已启动")
+    logger.info("Reaction 监控已启动，等待点赞...")
