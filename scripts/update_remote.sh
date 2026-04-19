@@ -1,21 +1,32 @@
 #!/bin/bash
 
 # ========================================
-# 使用前请先配置以下变量
+# 从 .env 文件读取配置（或使用环境变量）
 # ========================================
-# 方式 1：直接在这里配置
-# REMOTE_HOST="root@your.remote.host"
-# REMOTE_PATH="/root/workspace/tg_download"
+# 项目根目录
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# 方式 2：使用环境变量（推荐）
+# 从 .env 文件加载配置（如果存在）
+if [ -f "$PROJECT_DIR/.env" ]; then
+    echo "📄 从 .env 文件读取配置..."
+    set -a  # 自动 export 变量
+    source "$PROJECT_DIR/.env"
+    set +a
+fi
+
+# 检查 REMOTE_HOST 是否配置
 if [ -z "$REMOTE_HOST" ]; then
-    echo "❌ 请先设置 REMOTE_HOST 环境变量！"
-    echo "示例："
-    echo "  export REMOTE_HOST=\"root@your.remote.host\""
-    echo "  export REMOTE_PATH=\"/root/workspace/tg_download\""
+    echo "❌ 请先配置远程服务器！"
+    echo "方式 1：复制 .env.example 为 .env 并填入真实配置"
+    echo "        cp $PROJECT_DIR/.env.example $PROJECT_DIR/.env"
+    echo "        然后编辑 $PROJECT_DIR/.env"
+    echo "方式 2：设置环境变量"
+    echo "        export REMOTE_HOST=\"root@your.remote.host\""
+    echo "        export REMOTE_PATH=\"/root/workspace/tg_download\""
     exit 1
 fi
 
+# 默认 REMOTE_PATH
 if [ -z "$REMOTE_PATH" ]; then
     REMOTE_PATH="/root/workspace/tg_download"
 fi
