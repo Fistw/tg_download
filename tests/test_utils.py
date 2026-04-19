@@ -12,15 +12,15 @@ from src.utils import (
 class TestParseTelegramLink:
     def test_public_channel_link(self):
         result = parse_telegram_link("https://t.me/testchannel/456")
-        assert result == TelegramLink(channel="testchannel", message_id=456)
+        assert result == TelegramLink(channel="testchannel", message_id=456, is_comment=False)
 
     def test_public_channel_http(self):
         result = parse_telegram_link("http://t.me/my_channel/1")
-        assert result == TelegramLink(channel="my_channel", message_id=1)
+        assert result == TelegramLink(channel="my_channel", message_id=1, is_comment=False)
 
     def test_private_channel_link(self):
         result = parse_telegram_link("https://t.me/c/1234567890/789")
-        assert result == TelegramLink(channel="-1001234567890", message_id=789)
+        assert result == TelegramLink(channel="-1001234567890", message_id=789, is_comment=False)
 
     def test_invalid_link_raises(self):
         with pytest.raises(ValueError, match="无法解析"):
@@ -38,15 +38,19 @@ class TestParseTelegramLink:
 
     def test_public_channel_link_with_comment(self):
         result = parse_telegram_link("https://t.me/RSOOXX/1165?comment=512")
-        assert result == TelegramLink(channel="RSOOXX", message_id=512)
+        assert result == TelegramLink(channel="RSOOXX", message_id=512, is_comment=True)
 
     def test_private_channel_link_with_comment(self):
         result = parse_telegram_link("https://t.me/c/1234567890/789?comment=456")
-        assert result == TelegramLink(channel="-1001234567890", message_id=456)
+        assert result == TelegramLink(channel="-1001234567890", message_id=456, is_comment=True)
 
     def test_public_channel_link_with_fragment(self):
         result = parse_telegram_link("https://t.me/testchannel/456#hash")
-        assert result == TelegramLink(channel="testchannel", message_id=456)
+        assert result == TelegramLink(channel="testchannel", message_id=456, is_comment=False)
+
+    def test_public_channel_link_with_comment_and_other_params(self):
+        result = parse_telegram_link("https://t.me/globalnewsexpose/1097?single&comment=3244")
+        assert result == TelegramLink(channel="globalnewsexpose", message_id=3244, is_comment=True)
 
 
 class TestParseRange:

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 class TelegramLink:
     channel: str
     message_id: int
+    is_comment: bool = False
 
 
 # 支持 https://t.me/channel/123 和 https://t.me/c/1234567890/123（私有频道）
@@ -24,9 +25,9 @@ def parse_telegram_link(url: str) -> TelegramLink:
 
     支持格式:
       - https://t.me/channel_name/123
-      - https://t.me/channel_name/123?comment=456（使用 comment ID）
+      - https://t.me/channel_name/123?comment=456（评论消息）
       - https://t.me/c/1234567890/123 （私有频道）
-      - https://t.me/c/1234567890/123?comment=456（私有频道使用 comment ID）
+      - https://t.me/c/1234567890/123?comment=456（私有频道的评论）
     """
     from urllib.parse import urlparse, parse_qs
 
@@ -38,21 +39,25 @@ def parse_telegram_link(url: str) -> TelegramLink:
     if m:
         channel = f"-100{m.group(1)}"
         message_id = int(m.group(2))
+        is_comment = False
         # 检查是否有 comment 参数
         qs = parse_qs(parsed_url.query)
         if "comment" in qs:
             message_id = int(qs["comment"][0])
-        return TelegramLink(channel=channel, message_id=message_id)
+            is_comment = True
+        return TelegramLink(channel=channel, message_id=message_id, is_comment=is_comment)
 
     m = _PUBLIC_LINK_RE.match(clean_url)
     if m:
         channel = m.group(1)
         message_id = int(m.group(2))
+        is_comment = False
         # 检查是否有 comment 参数
         qs = parse_qs(parsed_url.query)
         if "comment" in qs:
             message_id = int(qs["comment"][0])
-        return TelegramLink(channel=channel, message_id=message_id)
+            is_comment = True
+        return TelegramLink(channel=channel, message_id=message_id, is_comment=is_comment)
 
     raise ValueError(f"无法解析 Telegram 链接: {url}")
 

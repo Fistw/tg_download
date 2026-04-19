@@ -132,6 +132,19 @@ async def download_by_link(
 
     # 处理私有频道 ID
     entity = int(channel) if channel.lstrip("-").isdigit() else channel
+
+    # 如果是评论消息，需要从讨论组频道中获取
+    if parsed.is_comment:
+        # 获取主频道实体
+        main_channel = await client.get_entity(entity)
+        # 讨论组频道 ID = 主频道 ID + 1000000
+        from telethon.tl.types import Channel
+        if isinstance(main_channel, Channel):
+            # 去掉 -100 前缀，加 1000000，再加回 -100
+            main_channel_id = abs(main_channel.id)
+            discussion_channel_id = main_channel_id + 1000000
+            entity = int(f"-100{discussion_channel_id}")
+
     message = await client.get_messages(entity, ids=parsed.message_id)
 
     if message is None:
