@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tg-download"
-version = "0.1.0"
-description = "Download restricted videos from Telegram channels via MTProto"
+version = "0.2.0"
+description = "Download restricted videos from Telegram channels via MTProto and sync to NAS"
 requires-python = ">=3.9"
 dependencies = [
     "telethon>=1.36.0",
@@ -16,6 +16,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+]
+nas = [
+    "wsgidav>=4.3.0",
+    "cheroot>=10.0.0",
+    "webdavclient3>=3.14.6",
+    "paramiko>=2.12.0",
 ]
 
 [project.scripts]

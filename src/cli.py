@@ -16,6 +16,7 @@ from .database import DownloadDB
 from .monitor import start_monitor
 from .bot_handler import setup_bot_handlers
 from .reaction_monitor import start_reaction_monitor
+from .webdav_server import WebDAVServer
 from .utils import parse_range, format_file_size
 
 
@@ -136,7 +137,19 @@ async def _cmd_serve(args, config) -> None:
     download_queue = DownloadQueue(
         manager.user, config.download.output_dir, history, config.download.max_concurrent
     )
+
+    # 启动 WebDAV 服务器
+    webdav_server = None
     try:
+        if config.webdav_server.enable:
+            try:
+                webdav_server = WebDAVServer(config.webdav_server, config.download.output_dir)
+                webdav_server.start()
+            except Exception as e:
+                print(f"警告: 无法启动 WebDAV 服务器: {e}")
+                import traceback
+                traceback.print_exc()
+
         if not args.no_monitor:
             await start_monitor(
                 manager.user, config.monitor, config.download.output_dir, history
@@ -155,6 +168,8 @@ async def _cmd_serve(args, config) -> None:
     except KeyboardInterrupt:
         print("\n正在停止...")
     finally:
+        if webdav_server:
+            webdav_server.stop()
         history.close()
         await manager.stop()
 

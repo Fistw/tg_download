@@ -15,6 +15,9 @@
 - **高速下载** — 支持自定义下载块大小，集成 cryptg 加密加速
 - **SQLite 任务管理** — 下载状态持久化，断点续传不丢失
 - **失败自动重试** — 网络异常自动重试，FloodWait 自动等待
+- **WebDAV 服务器** — 内置 WebDAV 服务器，让 NAS 可以直接挂载并同步下载目录
+- **NAS 自动同步** — 下载完成后自动通过 WebDAV 或 SFTP 同步到 NAS
+- **Bot 交互选择** — 下载完成后询问用户是否发送文件（默认不发送）
 
 ## 快速开始
 
@@ -56,6 +59,39 @@ download:
   chunk_size_kb: 2048  # 下载块大小（KB），推荐 2048（2MB）
   enable_reaction_download: false  # 是否启用点赞下载
   send_download_to_allowed_users: true  # 是否将下载的文件发送给允许的用户
+  ask_before_send: true  # 下载完成后是否询问用户再发送文件
+  ask_timeout_seconds: 300  # 询问超时时间（秒）
+
+# WebDAV 服务器配置（用于群晖 NAS 访问/同步）
+webdav_server:
+  enable: false
+  host: "0.0.0.0"
+  port: 8080
+  mount_path: "/"
+  username: ""  # 留空则不启用认证
+  password: ""
+  directory: ""  # 留空则使用 download.output_dir
+
+# NAS 同步配置（下载完成后自动上传到 NAS）
+nas_sync:
+  enable: false
+  sync_type: "webdav"  # "webdav" 或 "sftp"
+  # WebDAV 配置（如果 sync_type 是 "webdav"）
+  webdav_url: ""
+  webdav_username: ""
+  webdav_password: ""
+  webdav_remote_path: "/"
+  # SFTP 配置（如果 sync_type 是 "sftp"）
+  sftp_host: ""
+  sftp_port: 22
+  sftp_username: ""
+  sftp_password: ""
+  sftp_remote_path: "/"
+  sftp_key_path: ""  # 可选，使用密钥认证
+  # 通用配置
+  max_retries: 3
+  retry_delay_seconds: 5
+  delete_after_sync: false  # 同步成功后是否删除本地文件
 
 monitor:
   channels:
@@ -127,6 +163,57 @@ src/
 ├── bot_handler.py     # Bot 命令处理
 └── utils.py           # 工具函数
 ```
+
+## 与群晖 NAS 配合使用
+
+有两种方式可以将下载的视频同步到群晖 NAS：
+
+### 方案一：内置 WebDAV 服务器 + 群晖 Cloud Sync（推荐）
+
+1. **安装额外依赖**：
+   ```bash
+   pip install -e ".[nas]"
+   ```
+
+2. **启用并配置 WebDAV 服务器**：
+   ```yaml
+   webdav_server:
+     enable: true
+     host: "0.0.0.0"
+     port: 8080
+     username: "your_username"
+     password: "your_password"
+   ```
+
+3. **在群晖 DSM 中配置 Cloud Sync**：
+   - 打开「Cloud Sync」
+   - 点击「+」添加任务
+   - 选择「WebDAV」
+   - 服务器地址填：`http://你的服务器IP:8080`
+   - 填入用户名密码
+   - 选择本地路径和远程路径（如 /video）
+   - 设置同步方向为「仅下载远程更改」或「双向同步」
+   - 完成！
+
+### 方案二：自动 NAS 同步（WebDAV/SFTP）
+
+如果你希望下载完成后立即自动上传到 NAS，可以启用 NAS 同步功能：
+
+1. **安装额外依赖**：
+   ```bash
+   pip install -e ".[nas]"
+   ```
+
+2. **配置 NAS 同步**：
+   ```yaml
+   nas_sync:
+     enable: true
+     sync_type: "webdav"  # 或者 "sftp"
+     webdav_url: "http://你的NAS:5005"  # 群晖默认 WebDAV 端口
+     webdav_username: "你的NAS用户名"
+     webdav_password: "你的NAS密码"
+     webdav_remote_path: "/video"
+   ```
 
 ## 速度优化建议
 

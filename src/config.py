@@ -18,10 +18,45 @@ class TelegramConfig:
 @dataclass
 class DownloadConfig:
     output_dir: str = "./downloads"
-    max_concurrent: int = 5
-    chunk_size_kb: int = 2048
+    max_concurrent: int = 3
+    chunk_size_kb: int = 512
     enable_reaction_download: bool = False
     send_download_to_allowed_users: bool = True
+    ask_before_send: bool = True  # 新增：是否在发送前询问用户
+    ask_timeout_seconds: int = 300  # 新增：询问超时时间（秒）
+
+
+@dataclass
+class WebDAVServerConfig:
+    enable: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8080
+    mount_path: str = "/"
+    username: str = ""
+    password: str = ""
+    directory: str = ""  # 留空则使用 download.output_dir
+
+
+@dataclass
+class NASSyncConfig:
+    enable: bool = False
+    sync_type: str = "webdav"  # "webdav" 或 "sftp"
+    # WebDAV 客户端配置
+    webdav_url: str = ""
+    webdav_username: str = ""
+    webdav_password: str = ""
+    webdav_remote_path: str = "/"
+    # SFTP 客户端配置
+    sftp_host: str = ""
+    sftp_port: int = 22
+    sftp_username: str = ""
+    sftp_password: str = ""
+    sftp_remote_path: str = "/"
+    sftp_key_path: str = ""  # 可选，使用密钥认证
+    # 通用配置
+    max_retries: int = 3
+    retry_delay_seconds: int = 5
+    delete_after_sync: bool = False  # 同步后是否删除本地文件
 
 
 @dataclass
@@ -57,6 +92,8 @@ class AppConfig:
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     bot: BotConfig = field(default_factory=BotConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    webdav_server: WebDAVServerConfig = field(default_factory=WebDAVServerConfig)
+    nas_sync: NASSyncConfig = field(default_factory=NASSyncConfig)
 
 
 def load_config(path: str | Path = "config.yaml") -> AppConfig:
@@ -78,10 +115,12 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     dl_raw = raw.get("download", {})
     download = DownloadConfig(
         output_dir=dl_raw.get("output_dir", "./downloads"),
-        max_concurrent=int(dl_raw.get("max_concurrent", 5)),
+        max_concurrent=int(dl_raw.get("max_concurrent", 3)),
         chunk_size_kb=int(dl_raw.get("chunk_size_kb", 512)),
         enable_reaction_download=bool(dl_raw.get("enable_reaction_download", False)),
         send_download_to_allowed_users=bool(dl_raw.get("send_download_to_allowed_users", True)),
+        ask_before_send=bool(dl_raw.get("ask_before_send", True)),
+        ask_timeout_seconds=int(dl_raw.get("ask_timeout_seconds", 300)),
     )
 
     mon_raw = raw.get("monitor", {})
@@ -108,4 +147,42 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         filename=log_raw.get("filename", "tg_download.log"),
     )
 
-    return AppConfig(telegram=telegram, download=download, monitor=monitor, bot=bot, logging=logging)
+    webdav_raw = raw.get("webdav_server", {})
+    webdav_server = WebDAVServerConfig(
+        enable=bool(webdav_raw.get("enable", False)),
+        host=webdav_raw.get("host", "0.0.0.0"),
+        port=int(webdav_raw.get("port", 8080)),
+        mount_path=webdav_raw.get("mount_path", "/"),
+        username=os.environ.get("WEBDAV_USERNAME", webdav_raw.get("username", "")),
+        password=os.environ.get("WEBDAV_PASSWORD", webdav_raw.get("password", "")),
+        directory=webdav_raw.get("directory", ""),
+    )
+
+    nas_raw = raw.get("nas_sync", {})
+    nas_sync = NASSyncConfig(
+        enable=bool(nas_raw.get("enable", False)),
+        sync_type=nas_raw.get("sync_type", "webdav"),
+        webdav_url=os.environ.get("NAS_WEBDAV_URL", nas_raw.get("webdav_url", "")),
+        webdav_username=os.environ.get("NAS_WEBDAV_USERNAME", nas_raw.get("webdav_username", "")),
+        webdav_password=os.environ.get("NAS_WEBDAV_PASSWORD", nas_raw.get("webdav_password", "")),
+        webdav_remote_path=nas_raw.get("webdav_remote_path", "/"),
+        sftp_host=os.environ.get("NAS_SFTP_HOST", nas_raw.get("sftp_host", "")),
+        sftp_port=int(os.environ.get("NAS_SFTP_PORT", nas_raw.get("sftp_port", 22))),
+        sftp_username=os.environ.get("NAS_SFTP_USERNAME", nas_raw.get("sftp_username", "")),
+        sftp_password=os.environ.get("NAS_SFTP_PASSWORD", nas_raw.get("sftp_password", "")),
+        sftp_remote_path=nas_raw.get("sftp_remote_path", "/"),
+        sftp_key_path=nas_raw.get("sftp_key_path", ""),
+        max_retries=int(nas_raw.get("max_retries", 3)),
+        retry_delay_seconds=int(nas_raw.get("retry_delay_seconds", 5)),
+        delete_after_sync=bool(nas_raw.get("delete_after_sync", False)),
+    )
+
+    return AppConfig(
+        telegram=telegram,
+        download=download,
+        monitor=monitor,
+        bot=bot,
+        logging=logging,
+        webdav_server=webdav_server,
+        nas_sync=nas_sync,
+    )
