@@ -9,14 +9,14 @@ try:
     from wsgidav import wsgidav_app
     from wsgidav.fs_dav_provider import FilesystemProvider
     from wsgidav.mw.cors import Cors
-    from wsgidav.wsgidav_app import WsgiDavApp
+    from wsgidav.wsgidav_app import WsgiDAVApp
     WEBDAV_AVAILABLE = True
 except ImportError:
     WEBDAV_AVAILABLE = False
     wsgidav_app = None
     FilesystemProvider = None
     Cors = None
-    WsgiDavApp = None
+    WsgiDAVApp = None
 
 from src.config import WebDAVServerConfig
 
@@ -45,19 +45,16 @@ class WebDAVServer:
         mount_dir = self._get_mount_dir()
         mount_dir.mkdir(parents=True, exist_ok=True)
 
-        config = {
+        # 从默认配置开始
+        config = wsgidav_app.DEFAULT_CONFIG.copy()
+
+        # 更新我们的配置
+        config.update({
             "host": self.config.host,
             "port": self.config.port,
             "provider_mapping": {self.config.mount_path: FilesystemProvider(str(mount_dir))},
             "verbose": 1,
-            "logging": {
-                "enable": True,
-            },
-            "middleware_stack": [
-                Cors,
-                wsgidav_app.DEFAULT_MIDDLEWARE,
-            ],
-        }
+        })
 
         # 如果配置了用户名和密码，启用 HTTP 基本认证
         if self.config.username and self.config.password:
@@ -89,7 +86,7 @@ class WebDAVServer:
             from cheroot import wsgi
 
             config = self._build_config()
-            self._app = WsgiDavApp(config)
+            self._app = WsgiDAVApp(config)
 
             server = wsgi.Server(
                 (self.config.host, self.config.port),
