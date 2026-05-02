@@ -5,7 +5,13 @@ import logging
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
-from telethon import TelegramClient, events, Button
+try:
+    from telethon import TelegramClient, events, Button
+    BUTTON_AVAILABLE = True
+except ImportError:
+    from telethon import TelegramClient, events
+    BUTTON_AVAILABLE = False
+    logger.warning("Button 模块导入失败，将使用文本回复模式")
 from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
 
 from src.config import AppConfig, load_config
@@ -196,11 +202,15 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
                 downloaded_paths = await download_all_videos_in_message(client, message, config_dir, chunk_size_kb=chunk_size)
 
                 logger.info(f"✅ Download completed! Downloaded {len(downloaded_paths)} files")
+                logger.info(f"Downloaded paths: {downloaded_paths}")
 
                 # 同步到 NAS
                 if config.nas_sync.enable and downloaded_paths:
                     for path in downloaded_paths:
-                        await nas_syncer.sync_file(path)
+                        try:
+                            await nas_syncer.sync_file(path)
+                        except Exception as e:
+                            logger.warning(f"NAS 同步失败: {e}")
 
                 # 处理发送给用户的逻辑
                 if (
@@ -211,49 +221,84 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
                     for user_id in config.bot.allowed_users:
                         try:
                             if config.download.ask_before_send:
-                                # 生成唯一的回调数据
-                                callback_prefix = f"dl_{user_id}_{msg_id}"
-                                callback_send = f"{callback_prefix}_send"
-                                
-                                # 询问用户是否发送（使用按钮）
-                                question_msg = await bot_client.send_message(
-                                    user_id,
-                                    f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。",
-                                    buttons=[Button.inline("📤 发送", data=callback_send)]
-                                )
-
-                                # 创建事件等待用户回复
-                                should_send_event = asyncio.Event()
-                                _pending_tasks[user_id] = (question_msg.id, should_send_event, downloaded_paths)
-                                _callback_tasks[callback_send] = (user_id, should_send_event, downloaded_paths)
-
-                                # 等待用户回复或超时
-                                try:
-                                    await asyncio.wait_for(
-                                        should_send_event.wait(),
-                                        timeout=config.download.ask_timeout_seconds
+                                if BUTTON_AVAILABLE:
+                                    # 生成唯一的回调数据
+                                    callback_prefix = f"dl_{user_id}_{msg_id}"
+                                    callback_send = f"{callback_prefix}_send"
+                                    
+                                    # 询问用户是否发送（使用按钮）
+                                    logger.info(f"Sending button message to user {user_id}")
+                                    question_msg = await bot_client.send_message(
+                                        user_id,
+                                        f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。",
+                                        buttons=[Button.inline("📤 发送", data=callback_send)]
                                     )
-                                    should_send = should_send_event.is_set()
-                                except asyncio.TimeoutError:
-                                    should_send = False
-                                    try:
-                                        await bot_client.edit_message(
-                                            user_id,
-                                            question_msg.id,
-                                            f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n"
-                                            f"(⏰ 已超时)"
-                                        )
-                                    except:
-                                        pass
-                                finally:
-                                    if user_id in _pending_tasks:
-                                        del _pending_tasks[user_id]
-                                    if callback_send in _callback_tasks:
-                                        del _callback_tasks[callback_send]
 
-                                # 根据用户选择发送文件
-                                if should_send:
-                                    await _send_files_to_user(bot_client, user_id, downloaded_paths)
+                                    # 创建事件等待用户回复
+                                    should_send_event = asyncio.Event()
+                                    _pending_tasks[user_id] = (question_msg.id, should_send_event, downloaded_paths)
+                                    _callback_tasks[callback_send] = (user_id, should_send_event, downloaded_paths)
+
+                                    # 等待用户回复或超时
+                                    try:
+                                        await asyncio.wait_for(
+                                            should_send_event.wait(),
+                                            timeout=config.download.ask_timeout_seconds
+                                        )
+                                        should_send = should_send_event.is_set()
+                                    except asyncio.TimeoutError:
+                                        should_send = False
+                                        try:
+                                            await bot_client.edit_message(
+                                                user_id,
+                                                question_msg.id,
+                                                f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n"
+                                                f"(⏰ 已超时)"
+                                            )
+                                        except Exception as e:
+                                            logger.warning(f"编辑消息失败: {e}")
+                                    finally:
+                                        if user_id in _pending_tasks:
+                                            del _pending_tasks[user_id]
+                                        if callback_send in _callback_tasks:
+                                            del _callback_tasks[callback_send]
+
+                                    # 根据用户选择发送文件
+                                    if should_send:
+                                        await _send_files_to_user(bot_client, user_id, downloaded_paths)
+                                else:
+                                    # 回退到文本模式（按钮不可用）
+                                    question_msg = await bot_client.send_message(
+                                        user_id,
+                                        f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n"
+                                        f"是否发送文件给你？\n"
+                                        f"回复：\n"
+                                        f"- \"是\" 或 \"y\" 发送\n"
+                                        f"- \"否\" 或 \"n\" 不发送\n\n"
+                                        f"({config.download.ask_timeout_seconds} 秒后默认不发送)"
+                                    )
+
+                                    # 创建事件等待用户回复
+                                    should_send_event = asyncio.Event()
+                                    _pending_tasks[user_id] = (question_msg.id, should_send_event, downloaded_paths)
+
+                                    # 等待用户回复或超时
+                                    try:
+                                        await asyncio.wait_for(
+                                            should_send_event.wait(),
+                                            timeout=config.download.ask_timeout_seconds
+                                        )
+                                        should_send = should_send_event.is_set()
+                                    except asyncio.TimeoutError:
+                                        should_send = False
+                                        await bot_client.send_message(user_id, "⏰ 超时，默认不发送文件。")
+                                    finally:
+                                        if user_id in _pending_tasks:
+                                            del _pending_tasks[user_id]
+
+                                    # 根据用户选择发送文件
+                                    if should_send:
+                                        await _send_files_to_user(bot_client, user_id, downloaded_paths)
                             else:
                                 # 直接发送（保持原有行为）
                                 await _send_files_to_user(bot_client, user_id, downloaded_paths)
