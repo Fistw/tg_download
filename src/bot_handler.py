@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+from typing import Any
 
 from telethon import TelegramClient, events
 
 from .config import AppConfig
-from .downloader import download_by_link
+from .downloader import download_by_link, DownloadResult, VideoMetadata
 from .database import DownloadDB
 from .utils import parse_telegram_link
 
@@ -17,6 +19,39 @@ def _is_allowed(user_id: int, allowed_users: list[int]) -> bool:
     if not allowed_users:
         return True
     return user_id in allowed_users
+
+
+async def _send_video_with_metadata(
+    bot_client: TelegramClient,
+    chat_id: Any,
+    video_result: DownloadResult | Path,
+):
+    """使用元数据发送视频，支持预览图和流媒体播放。"""
+    # 获取实际文件路径
+    file_path = None
+    if isinstance(video_result, DownloadResult):
+        file_path = video_result.path
+        logger.info(f"📺 Sending video with metadata: {file_path}")
+        logger.info(f"   - Supports streaming: {video_result.metadata.supports_streaming}")
+        logger.info(f"   - Has attributes: {bool(video_result.metadata.attributes)}")
+        logger.info(f"   - Has thumbnail: {bool(video_result.metadata.thumb)}")
+    else:
+        file_path = video_result
+        logger.info(f"📺 Sending video without metadata: {file_path}")
+    
+    # 关键：设置 supports_streaming=True 来启用流媒体播放
+    try:
+        logger.info(f"   Calling send_file with supports_streaming=True")
+        result = await bot_client.send_file(
+            chat_id, 
+            str(file_path), 
+            supports_streaming=True
+        )
+        logger.info(f"   ✅ Video sent successfully!")
+    except Exception as e:
+        logger.error(f"   ❌ Error sending video: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 async def setup_bot_handlers(
@@ -45,22 +80,29 @@ async def setup_bot_handlers(
             history.update_status(parsed.channel, parsed.message_id, "downloading")
 
         try:
-            path = await download_by_link(user_client, link, output_dir)
-            if path is None:
+            result = await download_by_link(user_client, link, output_dir)
+            if result is None:
                 await event.reply("该消息不包含视频内容")
                 if history:
                     history.update_status(parsed.channel, parsed.message_id, "completed")
                 return
 
-            if history:
-                file_size = path.stat().st_size if path.exists() else None
-                history.update_status(parsed.channel, parsed.message_id, "completed", filename=path.name, file_size=file_size)
-
-            if path.exists() and path.stat().st_size < 2 * 1024 ** 3:
-                await event.reply("下载完成，正在发送文件...")
-                await bot_client.send_file(event.chat_id, str(path))
+            # 获取实际文件路径
+            file_path = None
+            if isinstance(result, DownloadResult):
+                file_path = result.path
             else:
-                await event.reply(f"下载完成: {path}")
+                file_path = result
+
+            if history:
+                file_size = file_path.stat().st_size if file_path.exists() else None
+                history.update_status(parsed.channel, parsed.message_id, "completed", filename=file_path.name, file_size=file_size)
+
+            if file_path.exists() and file_path.stat().st_size < 2 * 1024 ** 3:
+                await event.reply("下载完成，正在发送文件...")
+                await _send_video_with_metadata(bot_client, event.chat_id, result)
+            else:
+                await event.reply(f"下载完成: {file_path}")
         except Exception as e:
             if history:
                 history.update_status(parsed.channel, parsed.message_id, "failed", error_message=str(e))

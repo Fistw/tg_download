@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 
 try:
     from telethon import TelegramClient, events, Button
@@ -15,15 +15,48 @@ except ImportError:
 from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
 
 from src.config import AppConfig, load_config
-from src.downloader import download_all_videos_in_message
+from src.downloader import download_all_videos_in_message, DownloadResult, VideoMetadata
 from src.nas_sync import NASSyncer
 
 logger = logging.getLogger(__name__)
 
+
+async def _send_video_with_metadata(
+    bot_client: TelegramClient,
+    chat_id: Any,
+    video_result: DownloadResult | Path,
+):
+    """使用元数据发送视频，支持预览图和流媒体播放。"""
+    # 获取实际文件路径
+    file_path = None
+    if isinstance(video_result, DownloadResult):
+        file_path = video_result.path
+        logger.info(f"📺 Sending video with metadata: {file_path}")
+        logger.info(f"   - Supports streaming: {video_result.metadata.supports_streaming}")
+        logger.info(f"   - Has attributes: {bool(video_result.metadata.attributes)}")
+        logger.info(f"   - Has thumbnail: {bool(video_result.metadata.thumb)}")
+    else:
+        file_path = video_result
+        logger.info(f"📺 Sending video without metadata: {file_path}")
+    
+    # 关键：设置 supports_streaming=True 来启用流媒体播放
+    try:
+        logger.info(f"   Calling send_file with supports_streaming=True")
+        result = await bot_client.send_file(
+            chat_id, 
+            str(file_path), 
+            supports_streaming=True
+        )
+        logger.info(f"   ✅ Video sent successfully!")
+    except Exception as e:
+        logger.error(f"   ❌ Error sending video: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 # 存储等待用户回复的任务：user_id -> (message_id, should_send_event, downloaded_paths)
-_pending_tasks: Dict[int, Tuple[int, asyncio.Event, list[Path]]] = {}
+_pending_tasks: Dict[int, Tuple[int, asyncio.Event, list[DownloadResult | Path]]] = {}
 # 存储回调任务信息：callback_data -> (user_id, should_send_event, downloaded_paths)
-_callback_tasks: Dict[str, Tuple[int, asyncio.Event, list[Path]]] = {}
+_callback_tasks: Dict[str, Tuple[int, asyncio.Event, list[DownloadResult | Path]]] = {}
 
 
 def _is_valid_reaction_event(event_or_update):
@@ -81,32 +114,55 @@ async def _get_message_from_chat(client, chat_id, msg_id):
 
 
 async def _send_files_to_user(bot_client, user_id, downloaded_paths):
-    """发送文件给用户"""
+    """发送文件给用户，保持媒体组功能"""
     try:
         if downloaded_paths:
             await bot_client.send_message(user_id, f"✅ 点赞视频下载完成！共 {len(downloaded_paths)} 个文件")
             # 构建媒体文件列表
-            media_files = []
             oversized_files = []
-            for idx, path in enumerate(downloaded_paths, 1):
-                logger.info(f"  Adding file {idx}/{len(downloaded_paths)}: {path}")
-                if path and path.exists():
-                    file_size = path.stat().st_size
+            normal_files_with_meta = []
+            normal_file_paths = []
+            for idx, res in enumerate(downloaded_paths, 1):
+                logger.info(f"  Adding file {idx}/{len(downloaded_paths)}: {res}")
+                # 获取实际文件路径
+                file_path = None
+                if isinstance(res, DownloadResult):
+                    file_path = res.path
+                    normal_files_with_meta.append(res)
+                else:
+                    file_path = res
+                
+                if file_path and file_path.exists():
+                    file_size = file_path.stat().st_size
                     logger.info(f"    File size: {file_size} bytes")
                     if file_size < 2 * 1024 ** 3:
-                        media_files.append(str(path))
+                        normal_file_paths.append(str(file_path))
                     else:
-                        oversized_files.append(str(path))
+                        oversized_files.append(str(file_path))
                 else:
-                    logger.error(f"    ❌ File not found: {path}")
+                    logger.error(f"    ❌ File not found: {res}")
 
-            # 使用 send_media_group 发送多个文件（最多10个一组）
-            if media_files:
-                for i in range(0, len(media_files), 10):
-                    batch = media_files[i:i+10]
-                    logger.info(f"    Sending batch {i//10 + 1}, {len(batch)} files...")
-                    await bot_client.send_file(user_id, batch)
-                    logger.info(f"    ✅ Batch sent successfully")
+            # 如果只有一个文件，使用完整的元数据发送
+            if len(normal_file_paths) == 1 and normal_files_with_meta:
+                await _send_video_with_metadata(bot_client, user_id, normal_files_with_meta[0])
+            # 如果有多个文件，批量发送（媒体组），同时尝试设置 supports_streaming
+            elif normal_file_paths:
+                logger.info(f"📦 Sending {len(normal_file_paths)} files as a media group...")
+                try:
+                    # 批量发送媒体组，同时设置 supports_streaming
+                    await bot_client.send_file(
+                        user_id, 
+                        normal_file_paths,
+                        supports_streaming=True
+                    )
+                    logger.info(f"  ✅ Media group sent successfully!")
+                except Exception as e:
+                    logger.error(f"  ❌ Failed to send media group, falling back to individual sends: {e}")
+                    # 如果批量发送失败，逐个发送
+                    for i, res in enumerate(normal_files_with_meta, 1):
+                        logger.info(f"  Sending file {i}/{len(normal_files_with_meta)}...")
+                        await _send_video_with_metadata(bot_client, user_id, res)
+                        logger.info(f"  ✅ File {i} sent successfully")
 
             # 发送超大文件的通知
             for oversized_file in oversized_files:

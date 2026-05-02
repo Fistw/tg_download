@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Any
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, FileReferenceExpiredError
@@ -17,6 +18,42 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Optional[Callable[[int, int], None]]
 
 MAX_RETRIES = 3
+
+
+@dataclass
+class VideoMetadata:
+    """视频元数据，包含发送视频所需的信息"""
+    attributes: Optional[Any] = None  # DocumentAttribute 列表
+    thumb: Optional[Any] = None  # 缩略图数据
+    supports_streaming: bool = True
+
+
+@dataclass
+class DownloadResult:
+    """下载结果，包含文件路径和元数据。"""
+    path: Path
+    metadata: VideoMetadata
+    
+    def __post_init__(self):
+        # 支持向后兼容性：可以像 Path 一样使用
+        pass
+    
+    def __fspath__(self):
+        # 支持 os.fspath()
+        return str(self.path)
+    
+    def __str__(self):
+        return str(self.path)
+    
+    @property
+    def name(self):
+        return self.path.name
+    
+    def stat(self):
+        return self.path.stat()
+    
+    def exists(self):
+        return self.path.exists()
 
 
 def _is_video(message) -> bool:
@@ -33,6 +70,26 @@ def _is_video(message) -> bool:
     return any(
         doc.mime_type.startswith("video/") for _ in [1]
     ) if doc.mime_type else False
+
+
+def _extract_video_metadata(message) -> VideoMetadata:
+    """从消息中提取视频元数据。"""
+    metadata = VideoMetadata()
+    if not isinstance(message.media, MessageMediaDocument) or not message.media.document:
+        return metadata
+    
+    doc = message.media.document
+    metadata.attributes = list(doc.attributes) if doc.attributes else None
+    
+    # 获取缩略图（如果有）
+    if doc.thumbs and len(doc.thumbs) > 0:
+        # 选择最大的缩略图
+        metadata.thumb = doc.thumbs[-1]
+    
+    # 检查是否支持流媒体
+    metadata.supports_streaming = True
+    
+    return metadata
 
 
 def _build_filename(channel: str, message_id: int, message) -> str:
@@ -103,8 +160,13 @@ async def download_message(
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
     chunk_size_kb: int = 2048,
-) -> Path | None:
-    """下载单条消息中的视频媒体。如果消息不含视频则返回 None。"""
+) -> DownloadResult | Path | None:
+    """下载单条消息中的视频媒体。如果消息不含视频则返回 None。
+    
+    返回:
+      - DownloadResult 对象（包含 path 和 metadata）
+      - 或向后兼容的 Path 对象
+    """
     if not _is_video(message):
         logger.debug("消息 %d 不包含视频，跳过", message.id)
         return None
@@ -119,14 +181,20 @@ async def download_message(
 
     if file_path.exists():
         logger.info("文件已存在，跳过: %s", file_path)
-        return file_path
+        # 文件存在时，也需要提取元数据
+        metadata = _extract_video_metadata(message)
+        return DownloadResult(path=file_path, metadata=metadata)
 
     total_size = message.media.document.size if message.media.document else 0
     logger.info("开始下载: %s (大小: %s)", filename, format_progress(0, total_size))
 
-    result = await _download_with_retry(client, message, file_path, progress_callback, chunk_size_kb)
-    logger.info("下载完成: %s", result)
-    return result
+    result_path = await _download_with_retry(client, message, file_path, progress_callback, chunk_size_kb)
+    logger.info("下载完成: %s", result_path)
+    
+    # 提取视频元数据
+    metadata = _extract_video_metadata(message)
+    
+    return DownloadResult(path=result_path, metadata=metadata)
 
 
 async def download_all_videos_in_message(
@@ -135,15 +203,15 @@ async def download_all_videos_in_message(
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
     chunk_size_kb: int = 2048,
-) -> list[Path]:
+) -> list[DownloadResult | Path]:
     """下载一条消息里的所有视频（包括 grouped 的消息组）。"""
-    downloaded: list[Path] = []
+    downloaded: list[DownloadResult | Path] = []
 
     # 先尝试下载本条消息的视频
     if _is_video(message):
-        path = await download_message(client, message, output_dir, progress_callback, chunk_size_kb)
-        if path:
-            downloaded.append(path)
+        result = await download_message(client, message, output_dir, progress_callback, chunk_size_kb)
+        if result:
+            downloaded.append(result)
 
     # 检查是否有 grouped_id，下载同组里的其他消息
     if hasattr(message, "grouped_id") and message.grouped_id:
@@ -155,19 +223,25 @@ async def download_all_videos_in_message(
             nearby_messages = await client.get_messages(chat, ids=nearby_ids)
             for nearby_msg in nearby_messages:
                 if nearby_msg and nearby_msg.grouped_id == message.grouped_id and nearby_msg.id != message.id and _is_video(nearby_msg):
-                    path = await download_message(client, nearby_msg, output_dir, progress_callback, chunk_size_kb)
-                    if path:
-                        downloaded.append(path)
+                    result = await download_message(client, nearby_msg, output_dir, progress_callback, chunk_size_kb)
+                    if result:
+                        downloaded.append(result)
         except Exception as e:
             logger.warning(f"获取 grouped 消息失败: {e}")
 
     # 去重（避免重复下载）
     unique_downloaded = []
     seen_paths = set()
-    for p in downloaded:
-        if p and str(p) not in seen_paths:
-            unique_downloaded.append(p)
-            seen_paths.add(str(p))
+    for res in downloaded:
+        path_str = None
+        if isinstance(res, DownloadResult):
+            path_str = str(res.path)
+        elif isinstance(res, Path):
+            path_str = str(res)
+        
+        if path_str and path_str not in seen_paths:
+            unique_downloaded.append(res)
+            seen_paths.add(path_str)
     return unique_downloaded
 
 
@@ -176,7 +250,7 @@ async def download_by_link(
     link: str,
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
-) -> Path | None:
+) -> DownloadResult | Path | None:
     """通过 Telegram 消息链接下载视频。"""
     parsed = parse_telegram_link(link)
     channel = parsed.channel
@@ -241,7 +315,9 @@ async def download_range(
     results = await asyncio.gather(*tasks, return_exceptions=True)
     paths: list[Path] = []
     for r in results:
-        if isinstance(r, Path):
+        if isinstance(r, DownloadResult):
+            paths.append(r.path)
+        elif isinstance(r, Path):
             paths.append(r)
         elif isinstance(r, Exception):
             logger.error("下载失败: %s", r)
