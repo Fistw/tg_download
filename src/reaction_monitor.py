@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, Button
 from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
 
 from src.config import AppConfig, load_config
@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 # 存储等待用户回复的任务：user_id -> (message_id, should_send_event, downloaded_paths)
 _pending_tasks: Dict[int, Tuple[int, asyncio.Event, list[Path]]] = {}
+# 存储回调任务信息：callback_data -> (user_id, should_send_event, downloaded_paths)
+_callback_tasks: Dict[str, Tuple[int, asyncio.Event, list[Path]]] = {}
 
 
 def _is_valid_reaction_event(event_or_update):
@@ -209,20 +211,21 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
                     for user_id in config.bot.allowed_users:
                         try:
                             if config.download.ask_before_send:
-                                # 询问用户是否发送
+                                # 生成唯一的回调数据
+                                callback_prefix = f"dl_{user_id}_{msg_id}"
+                                callback_send = f"{callback_prefix}_send"
+                                
+                                # 询问用户是否发送（使用按钮）
                                 question_msg = await bot_client.send_message(
                                     user_id,
-                                    f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n"
-                                    f"是否发送文件给你？\n"
-                                    f"回复：\n"
-                                    f"- \"是\" 或 \"y\" 发送\n"
-                                    f"- \"否\" 或 \"n\" 不发送\n\n"
-                                    f"({config.download.ask_timeout_seconds} 秒后默认不发送)"
+                                    f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。",
+                                    buttons=[Button.inline("📤 发送", data=callback_send)]
                                 )
 
                                 # 创建事件等待用户回复
                                 should_send_event = asyncio.Event()
                                 _pending_tasks[user_id] = (question_msg.id, should_send_event, downloaded_paths)
+                                _callback_tasks[callback_send] = (user_id, should_send_event, downloaded_paths)
 
                                 # 等待用户回复或超时
                                 try:
@@ -233,16 +236,24 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
                                     should_send = should_send_event.is_set()
                                 except asyncio.TimeoutError:
                                     should_send = False
-                                    await bot_client.send_message(user_id, "⏰ 超时，默认不发送文件。")
+                                    try:
+                                        await bot_client.edit_message(
+                                            user_id,
+                                            question_msg.id,
+                                            f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n"
+                                            f"(⏰ 已超时)"
+                                        )
+                                    except:
+                                        pass
                                 finally:
                                     if user_id in _pending_tasks:
                                         del _pending_tasks[user_id]
+                                    if callback_send in _callback_tasks:
+                                        del _callback_tasks[callback_send]
 
                                 # 根据用户选择发送文件
                                 if should_send:
                                     await _send_files_to_user(bot_client, user_id, downloaded_paths)
-                                else:
-                                    await bot_client.send_message(user_id, "✅ 好的，不发送文件。")
                             else:
                                 # 直接发送（保持原有行为）
                                 await _send_files_to_user(bot_client, user_id, downloaded_paths)
@@ -269,9 +280,52 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
 
     # 只有当 bot_client 存在时才添加 Bot 消息处理器
     if bot_client:
+        @bot_client.on(events.CallbackQuery())
+        async def on_callback_query(event):
+            """处理按钮点击回调"""
+            try:
+                callback_data = event.data.decode() if event.data else ""
+                logger.debug(f"Received callback query: {callback_data}")
+
+                if callback_data not in _callback_tasks:
+                    await event.answer("❌ 该操作已过期或无效")
+                    return
+
+                user_id, should_send_event, downloaded_paths = _callback_tasks[callback_data]
+
+                # 确认是正确的用户
+                if event.sender_id != user_id:
+                    await event.answer("❌ 你没有权限执行此操作")
+                    return
+
+                # 更新消息，移除按钮并显示状态
+                try:
+                    new_text = (
+                        f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n"
+                        f"📤 正在发送文件..."
+                    )
+                    await event.edit(new_text, buttons=None)
+                except Exception as e:
+                    logger.warning(f"Failed to edit message: {e}")
+
+                # 发送反馈
+                await event.answer("✅ 已收到！正在发送...")
+
+                # 设置事件 - 发送文件
+                should_send_event.set()
+
+            except Exception as e:
+                logger.error(f"Error handling callback query: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                try:
+                    await event.answer("❌ 处理失败")
+                except:
+                    pass
+
         @bot_client.on(events.NewMessage())
         async def on_bot_message(event):
-            """监听 Bot 消息，处理用户回复"""
+            """监听 Bot 消息，处理用户回复（保持向后兼容）"""
             try:
                 user_id = event.sender_id
                 if user_id not in _pending_tasks:
@@ -286,7 +340,7 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
                 elif text in ["否", "n", "no", "不发送"]:
                     should_send_event.clear()
                 else:
-                    await event.reply("❓ 请回复 \"是\" 或 \"否\"")
+                    await event.reply("❓ 请回复 \"是\" 或 \"否\"，或点击按钮")
                     return
             except Exception as e:
                 logger.error(f"Error handling bot message: {e}")
