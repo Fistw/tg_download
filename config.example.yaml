@@ -6,10 +6,43 @@ telegram:
 
 download:
   output_dir: "./downloads"
-  max_concurrent: 5  # 同时下载的最大文件数，建议 5-10
-  chunk_size_kb: 2048  # 下载块大小（KB），建议 2048（最快）
+  max_concurrent: 3  # 同时下载的最大文件数
+  chunk_size_kb: 512  # 下载块大小（KB）
   enable_reaction_download: false
   send_download_to_allowed_users: true
+  ask_before_send: true  # 下载后是否询问用户再发送文件
+  ask_timeout_seconds: 300  # 询问超时时间（秒）
+
+# WebDAV 服务器配置（用于群晖 NAS 访问）
+webdav_server:
+  enable: false
+  host: "0.0.0.0"
+  port: 8080
+  mount_path: "/"
+  username: ""  # WebDAV 用户名（留空则不启用认证）
+  password: ""  # WebDAV 密码
+  directory: ""  # 留空则使用 download.output_dir
+
+# NAS 同步配置（可选，下载后自动上传到 NAS）
+nas_sync:
+  enable: false
+  sync_type: "webdav"  # "webdav" 或 "sftp"
+  # WebDAV 配置（如果 sync_type 是 "webdav"）
+  webdav_url: ""
+  webdav_username: ""
+  webdav_password: ""
+  webdav_remote_path: "/"
+  # SFTP 配置（如果 sync_type 是 "sftp"）
+  sftp_host: ""
+  sftp_port: 22
+  sftp_username: ""
+  sftp_password: ""
+  sftp_remote_path: "/"
+  sftp_key_path: ""  # 可选，使用密钥认证
+  # 通用配置
+  max_retries: 3
+  retry_delay_seconds: 5
+  delete_after_sync: false  # 同步后是否删除本地文件
 
 monitor:
   channels: []
