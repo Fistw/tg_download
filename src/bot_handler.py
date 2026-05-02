@@ -9,7 +9,8 @@ from telethon import TelegramClient, events
 from .config import AppConfig
 from .downloader import download_by_link, DownloadResult, VideoMetadata
 from .database import DownloadDB
-from .utils import parse_telegram_link
+from .utils import parse_telegram_link, format_file_size
+from .cache import cleanup_cache
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,8 @@ async def setup_bot_handlers(
             "命令:\n"
             "/download <链接> — 下载指定链接的视频\n"
             "/status — 查看状态\n"
+            "/clean_cache — 清理本地缓存视频\n"
+            "/clean_cache --dry-run — 预览清理而不删除\n"
         )
 
     @bot_client.on(events.NewMessage(pattern=r"/download\s+(.+)"))
@@ -154,5 +157,44 @@ async def setup_bot_handlers(
             f"下载目录: {output_dir}"
         )
         await event.reply(status_text)
+    
+    @bot_client.on(events.NewMessage(pattern=r"/clean_cache(\s+--dry-run)?$"))
+    async def on_clean_cache(event):
+        if not _is_allowed(event.sender_id, allowed):
+            await event.reply("你没有权限使用此 Bot")
+            return
+        
+        dry_run = bool(event.pattern_match.group(1))
+        msg_parts = [
+            f"开始清理缓存{'（预览模式）' if dry_run else ''}...",
+            f"  保留天数: {config.download.cache_retention_days} 天",
+            f"  最大大小: {config.download.max_cache_size_gb:.2f} GB",
+        ]
+        status_msg = await event.reply("\n".join(msg_parts))
+        
+        try:
+            result = cleanup_cache(
+                Path(output_dir),
+                config.download.cache_retention_days,
+                config.download.max_cache_size_gb,
+                dry_run=dry_run
+            )
+            
+            result_text = [
+                f"清理完成！",
+                f"  删除文件: {len(result.deleted_files)} 个",
+                f"  释放空间: {format_file_size(result.total_freed_bytes)}",
+                f"  目录大小: {format_file_size(result.dir_size_before)} -> {format_file_size(result.dir_size_after)}"
+            ]
+            
+            if dry_run and len(result.deleted_files) > 0:
+                result_text.append("")
+                result_text.append("⚠️  预览模式：没有实际删除")
+            
+            await status_msg.edit("\n".join(msg_parts + [""] + result_text))
+        
+        except Exception as e:
+            logger.exception("清理缓存失败")
+            await status_msg.edit(f"清理失败: {e}")
 
     logger.info("Bot 命令处理器已注册")

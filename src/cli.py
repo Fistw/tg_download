@@ -18,6 +18,7 @@ from .bot_handler import setup_bot_handlers
 from .reaction_monitor import start_reaction_monitor
 from .webdav_server import WebDAVServer
 from .utils import parse_range, format_file_size
+from .cache import cleanup_cache
 
 
 def _setup_logging(verbose: bool = False, config: AppConfig | None = None) -> None:
@@ -89,6 +90,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="启动 Bot + 频道监控服务")
     sv.add_argument("--no-bot", action="store_true", help="不启动 Bot")
     sv.add_argument("--no-monitor", action="store_true", help="不启动监控")
+    
+    # clean-cache 子命令
+    cc = sub.add_parser("clean-cache", help="清理本地缓存视频")
+    cc.add_argument("--dry-run", action="store_true", help="预览但不实际删除")
+    cc.add_argument("--dir", help="缓存目录路径（默认从配置读取）")
+    cc.add_argument("--days", type=int, help="保留天数（默认从配置读取）")
+    cc.add_argument("--max-size-gb", type=float, help="最大缓存大小（GB，默认从配置读取）")
 
     return parser
 
@@ -126,6 +134,27 @@ async def _cmd_download(args, config) -> None:
                 print(f"\n下载完成: {path} ({size})")
     finally:
         await manager.stop()
+
+
+async def _cmd_clean_cache(args, config) -> None:
+    # 获取参数
+    dir_path = args.dir or config.download.output_dir
+    retention_days = args.days or config.download.cache_retention_days
+    max_size_gb = args.max_size_gb or config.download.max_cache_size_gb
+    
+    dir_path = Path(dir_path)
+    
+    result = cleanup_cache(
+        dir_path, retention_days, max_size_gb, dry_run=args.dry_run)
+    
+    # 打印结果
+    print(f"\n清理结果:")
+    print(f"  删除文件数: {len(result.deleted_files)}")
+    print(f"  释放空间: {format_file_size(result.total_freed_bytes)}")
+    print(f"  目录大小: {format_file_size(result.dir_size_before)} -> {format_file_size(result.dir_size_after)}")
+    
+    if args.dry_run and len(result.deleted_files) > 0:
+        print(f"\n⚠️  预览模式：没有实际删除")
 
 
 async def _cmd_serve(args, config) -> None:
@@ -187,6 +216,8 @@ def main() -> None:
         asyncio.run(_cmd_download(args, config))
     elif args.command == "serve":
         asyncio.run(_cmd_serve(args, config))
+    elif args.command == "clean-cache":
+        asyncio.run(_cmd_clean_cache(args, config))
 
 
 if __name__ == "__main__":

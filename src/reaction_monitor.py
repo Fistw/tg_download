@@ -17,6 +17,7 @@ from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
 from src.config import AppConfig, load_config
 from src.downloader import download_all_videos_in_message, DownloadResult, VideoMetadata
 from src.nas_sync import NASSyncer
+from src.cache import cleanup_cache
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +268,21 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
                             await nas_syncer.sync_file(path)
                         except Exception as e:
                             logger.warning(f"NAS 同步失败: {e}")
+                
+                # 自动清理缓存
+                if config.download.enable_cache_cleanup:
+                    logger.info("🧹 自动清理本地缓存...")
+                    try:
+                        cleanup_result = cleanup_cache(
+                            Path(config.download.output_dir),
+                            config.download.cache_retention_days,
+                            config.download.max_cache_size_gb
+                        )
+                        logger.info(f"✅ 缓存清理完成：删除 {len(cleanup_result.deleted_files)} 个文件，释放 {cleanup_result.total_freed_bytes} 字节")
+                    except Exception as e:
+                        logger.error(f"❌ 缓存清理失败: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
 
                 # 处理发送给用户的逻辑
                 if (

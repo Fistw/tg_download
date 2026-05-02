@@ -24,6 +24,9 @@ class DownloadConfig:
     send_download_to_allowed_users: bool = True
     ask_before_send: bool = True  # 新增：是否在发送前询问用户
     ask_timeout_seconds: int = 300  # 新增：询问超时时间（秒）
+    enable_cache_cleanup: bool = True  # 是否启用自动清理
+    cache_retention_days: int = 3  # 缓存保留天数
+    max_cache_size_gb: float = 8.0  # 最大缓存大小（GB）
 
 
 @dataclass
@@ -121,6 +124,9 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         send_download_to_allowed_users=bool(dl_raw.get("send_download_to_allowed_users", True)),
         ask_before_send=bool(dl_raw.get("ask_before_send", True)),
         ask_timeout_seconds=int(dl_raw.get("ask_timeout_seconds", 300)),
+        enable_cache_cleanup=bool(dl_raw.get("enable_cache_cleanup", True)),
+        cache_retention_days=int(dl_raw.get("cache_retention_days", 3)),
+        max_cache_size_gb=float(dl_raw.get("max_cache_size_gb", 8.0)),
     )
 
     mon_raw = raw.get("monitor", {})

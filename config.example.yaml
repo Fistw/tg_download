@@ -12,6 +12,10 @@ download:
   send_download_to_allowed_users: true
   ask_before_send: true  # 下载后是否询问用户再发送文件
   ask_timeout_seconds: 300  # 询问超时时间（秒）
+  # 缓存清理配置
+  enable_cache_cleanup: true  # 是否启用自动缓存清理
+  cache_retention_days: 3  # 缓存文件保留天数
+  max_cache_size_gb: 8.0  # 最大缓存大小（GB）
 
 # WebDAV 服务器配置（用于群晖 NAS 访问）
 webdav_server:
