@@ -220,6 +220,55 @@ class TestClose:
             db.get_task("chan", 1)
 
 
+class TestDownloadProgress:
+    def test_update_progress(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            db.create_task("chan", 1, total_bytes=1024)
+            db.update_progress("chan", 1, 512)
+            task = db.get_task("chan", 1)
+            assert task["downloaded_bytes"] == 512
+            assert task["total_bytes"] == 1024
+            assert task["last_progress_at"] is not None
+        finally:
+            db.close()
+    
+    def test_update_status_with_progress(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            db.create_task("chan", 1)
+            db.update_status("chan", 1, "downloading", downloaded_bytes=256, total_bytes=1024, increment_retry=True)
+            task = db.get_task("chan", 1)
+            assert task["downloaded_bytes"] == 256
+            assert task["total_bytes"] == 1024
+            assert task["retry_count"] == 1
+        finally:
+            db.close()
+
+
+class TestPendingTasks:
+    def test_get_pending_tasks(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            db.create_task("chan", 1)
+            db.update_status("chan", 1, "downloading")
+            
+            db.create_task("chan", 2)
+            db.update_status("chan", 2, "failed", error_message="test")
+            
+            db.create_task("chan", 3)
+            db.update_status("chan", 3, "completed")
+            
+            pending = db.get_pending_tasks()
+            assert len(pending) == 2
+            
+            message_ids = {t["message_id"] for t in pending}
+            assert 1 in message_ids
+            assert 2 in message_ids
+        finally:
+            db.close()
+
+
 class TestDownloadHistoryAlias:
     def test_alias_is_download_db(self):
         assert DownloadHistory is DownloadDB

@@ -24,9 +24,22 @@ class DownloadConfig:
     send_download_to_allowed_users: bool = True
     ask_before_send: bool = True  # 新增：是否在发送前询问用户
     ask_timeout_seconds: int = 300  # 新增：询问超时时间（秒）
+    # 重试策略配置
+    max_retries: int = 5
+    retry_base_delay: float = 1.0
+    retry_max_delay: float = 60.0
+    # 自动恢复配置
+    auto_resume: bool = True
+    # 缓存清理配置
     enable_cache_cleanup: bool = True  # 是否启用自动清理
     cache_retention_days: int = 3  # 缓存保留天数
     max_cache_size_gb: float = 8.0  # 最大缓存大小（GB）
+    # 连接池配置
+    connection_pool_size: int = 1  # 连接池大小，默认1个连接保持向后兼容
+    # 分片下载配置
+    enable_chunked_download: bool = False  # 是否启用分片下载
+    chunk_size_mb: int = 50  # 每个分片的大小（MB）
+    max_concurrent_chunks: int = 3  # 最大并发下载分片数
 
 
 @dataclass
@@ -124,9 +137,17 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         send_download_to_allowed_users=bool(dl_raw.get("send_download_to_allowed_users", True)),
         ask_before_send=bool(dl_raw.get("ask_before_send", True)),
         ask_timeout_seconds=int(dl_raw.get("ask_timeout_seconds", 300)),
+        max_retries=int(dl_raw.get("max_retries", 5)),
+        retry_base_delay=float(dl_raw.get("retry_base_delay", 1.0)),
+        retry_max_delay=float(dl_raw.get("retry_max_delay", 60.0)),
+        auto_resume=bool(dl_raw.get("auto_resume", True)),
         enable_cache_cleanup=bool(dl_raw.get("enable_cache_cleanup", True)),
         cache_retention_days=int(dl_raw.get("cache_retention_days", 3)),
         max_cache_size_gb=float(dl_raw.get("max_cache_size_gb", 8.0)),
+        connection_pool_size=int(dl_raw.get("connection_pool_size", 1)),
+        enable_chunked_download=bool(dl_raw.get("enable_chunked_download", False)),
+        chunk_size_mb=int(dl_raw.get("chunk_size_mb", 50)),
+        max_concurrent_chunks=int(dl_raw.get("max_concurrent_chunks", 3)),
     )
 
     mon_raw = raw.get("monitor", {})

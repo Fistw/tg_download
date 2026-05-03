@@ -12,10 +12,22 @@ download:
   send_download_to_allowed_users: true
   ask_before_send: true  # 下载后是否询问用户再发送文件
   ask_timeout_seconds: 300  # 询问超时时间（秒）
+  # 重试策略配置
+  max_retries: 5  # 最大重试次数
+  retry_base_delay: 1.0  # 基础重试延迟（秒）
+  retry_max_delay: 60.0  # 最大重试延迟（秒）
+  # 自动恢复配置
+  auto_resume: true  # 是否自动恢复中断的下载
   # 缓存清理配置
   enable_cache_cleanup: true  # 是否启用自动缓存清理
   cache_retention_days: 3  # 缓存文件保留天数
   max_cache_size_gb: 8.0  # 最大缓存大小（GB）
+  # 连接池配置
+  connection_pool_size: 1  # 连接池大小（单个账号建议不超过3-5个连接）
+  # 分片下载配置（实验性功能）
+  enable_chunked_download: false  # 是否启用分片下载
+  chunk_size_mb: 50  # 每个分片的大小（MB）
+  max_concurrent_chunks: 3  # 最大并发下载分片数
 
 # WebDAV 服务器配置（用于群晖 NAS 访问）
 webdav_server:

@@ -11,13 +11,17 @@ from telethon.errors import FloodWaitError, FileReferenceExpiredError
 from telethon.tl.types import MessageMediaDocument
 
 from .database import DownloadDB
+from .limiter import FloodWaitCoordinator, RetryStrategy, get_flood_coordinator
 from .utils import parse_telegram_link, format_progress
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Optional[Callable[[int, int], None]]
 
-MAX_RETRIES = 3
+# 默认配置
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_RETRY_BASE_DELAY = 1.0
+DEFAULT_RETRY_MAX_DELAY = 60.0
 
 
 @dataclass
@@ -115,43 +119,120 @@ async def _download_with_retry(
     file_path: Path,
     progress_callback: ProgressCallback = None,
     chunk_size_kb: int = 2048,
+    channel: Optional[str] = None,
+    message_id: Optional[int] = None,
+    db: Optional[DownloadDB] = None,
+    retry_strategy: Optional[RetryStrategy] = None,
+    flood_coordinator: Optional[FloodWaitCoordinator] = None,
 ) -> Path:
-    """带重试逻辑的下载，支持自定义块大小。"""
+    """带重试逻辑的下载，支持断点续传、自定义块大小。"""
     request_size = chunk_size_kb * 1024  # KB -> bytes
     
-    for attempt in range(1, MAX_RETRIES + 1):
+    # 使用默认策略
+    if retry_strategy is None:
+        retry_strategy = RetryStrategy(
+            max_retries=DEFAULT_MAX_RETRIES,
+            base_delay=DEFAULT_RETRY_BASE_DELAY,
+            max_delay=DEFAULT_RETRY_MAX_DELAY,
+        )
+    
+    if flood_coordinator is None:
+        flood_coordinator = get_flood_coordinator()
+    
+    # 获取文件大小
+    file_size = message.media.document.size if (message.media and message.media.document) else 0
+    
+    # 检查是否有已下载的部分
+    initial_offset = 0
+    if file_path.exists():
+        initial_offset = file_path.stat().st_size
+        if initial_offset > 0:
+            if initial_offset >= file_size:
+                logger.info("文件已下载完成：%s", file_path)
+                return file_path
+            logger.info("检测到部分下载文件，从 %d 字节继续：%s", initial_offset, file_path)
+    
+    # 更新数据库状态为下载中
+    if db and channel and message_id:
+        db.update_status(
+            channel, message_id, "downloading",
+            total_bytes=file_size,
+            downloaded_bytes=initial_offset,
+        )
+    
+    attempt = 0
+    downloaded = initial_offset
+    while retry_strategy.should_retry(attempt):
         try:
-            # 使用 iter_download 并支持自定义 request_size 以提高速度
-            file_size = message.media.document.size if (message.media and message.media.document) else 0
-            downloaded = 0
-            with open(str(file_path), 'wb') as f:
+            await flood_coordinator.wait_if_needed()
+            
+            current_offset = downloaded
+            mode = 'ab' if current_offset > 0 else 'wb'
+            
+            with open(str(file_path), mode) as f:
                 async for chunk in client.iter_download(
                     message,
+                    offset=current_offset,
                     request_size=request_size,
                 ):
                     f.write(chunk)
                     downloaded += len(chunk)
+                    
+                    # 更新进度到数据库
+                    if db and channel and message_id:
+                        db.update_progress(channel, message_id, downloaded)
+                    
                     if progress_callback and file_size > 0:
                         progress_callback(downloaded, file_size)
+            
+            logger.info("下载完成：%s (%.2f MB)", file_path, downloaded / (1024 * 1024))
             return file_path
+            
         except FloodWaitError as e:
-            logger.warning("触发 FloodWait，等待 %d 秒后重试 (第%d次)", e.seconds, attempt)
-            await asyncio.sleep(e.seconds)
+            logger.warning("触发 FloodWait，设置全局等待 %d 秒 (尝试 %d)", e.seconds, attempt + 1)
+            await flood_coordinator.set_wait(e.seconds)
+            attempt += 1
+            
         except FileReferenceExpiredError:
-            logger.warning("FileReference 已过期，重新获取消息 (第%d次)", attempt)
+            logger.warning("FileReference 已过期，重新获取消息 (尝试 %d)", attempt + 1)
             # 重新获取消息以刷新 file_reference
             chat = await message.get_input_chat()
             refreshed = await client.get_messages(chat, ids=message.id)
             if refreshed is None:
                 raise RuntimeError(f"无法重新获取消息 {message.id}")
             message = refreshed
-        except Exception:
-            if attempt == MAX_RETRIES:
+            attempt += 1
+            
+        except Exception as e:
+            if not retry_strategy.should_retry(attempt):
+                # 更新数据库状态为失败
+                if db and channel and message_id:
+                    db.update_status(
+                        channel, message_id, "failed",
+                        error_message=str(e),
+                        downloaded_bytes=downloaded,
+                        increment_retry=True,
+                    )
                 raise
-            wait = 2 ** attempt
-            logger.warning("下载失败，%d 秒后重试 (第%d次)", wait, attempt)
-            await asyncio.sleep(wait)
-    raise RuntimeError(f"下载在 {MAX_RETRIES} 次重试后仍然失败")
+            
+            delay = retry_strategy.get_delay(attempt)
+            logger.warning(
+                "下载失败，%d 秒后重试 (尝试 %d/%d, 已下载 %d 字节): %s",
+                delay, attempt + 1, retry_strategy.max_retries, downloaded, e
+            )
+            
+            # 更新数据库状态
+            if db and channel and message_id:
+                db.update_status(
+                    channel, message_id, "downloading",
+                    downloaded_bytes=downloaded,
+                    increment_retry=True,
+                )
+            
+            await asyncio.sleep(delay)
+            attempt += 1
+    
+    raise RuntimeError(f"下载在 {retry_strategy.max_retries} 次重试后仍然失败")
 
 
 async def download_message(
@@ -160,6 +241,10 @@ async def download_message(
     output_dir: str | Path,
     progress_callback: ProgressCallback = None,
     chunk_size_kb: int = 2048,
+    channel: Optional[str] = None,
+    db: Optional[DownloadDB] = None,
+    retry_strategy: Optional[RetryStrategy] = None,
+    flood_coordinator: Optional[FloodWaitCoordinator] = None,
 ) -> DownloadResult | Path | None:
     """下载单条消息中的视频媒体。如果消息不含视频则返回 None。
     
@@ -175,21 +260,29 @@ async def download_message(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     chat = await message.get_input_chat()
-    channel_name = getattr(chat, "username", None) or str(getattr(chat, "channel_id", "unknown"))
+    channel_name = channel or (getattr(chat, "username", None) or str(getattr(chat, "channel_id", "unknown")))
     filename = _build_filename(channel_name, message.id, message)
     file_path = output_dir / filename
 
     if file_path.exists():
-        logger.info("文件已存在，跳过: %s", file_path)
-        # 文件存在时，也需要提取元数据
-        metadata = _extract_video_metadata(message)
-        return DownloadResult(path=file_path, metadata=metadata)
+        # 检查是否已完整下载
+        if message.media and message.media.document:
+            expected_size = message.media.document.size
+            actual_size = file_path.stat().st_size
+            if actual_size >= expected_size:
+                logger.info("文件已存在且完整，跳过：%s", file_path)
+                metadata = _extract_video_metadata(message)
+                return DownloadResult(path=file_path, metadata=metadata)
 
     total_size = message.media.document.size if message.media.document else 0
-    logger.info("开始下载: %s (大小: %s)", filename, format_progress(0, total_size))
+    logger.info("开始下载：%s (大小: %s)", filename, format_progress(0, total_size))
 
-    result_path = await _download_with_retry(client, message, file_path, progress_callback, chunk_size_kb)
-    logger.info("下载完成: %s", result_path)
+    result_path = await _download_with_retry(
+        client, message, file_path, progress_callback, chunk_size_kb,
+        channel=channel_name, message_id=message.id, db=db,
+        retry_strategy=retry_strategy, flood_coordinator=flood_coordinator,
+    )
+    logger.info("下载完成：%s", result_path)
     
     # 提取视频元数据
     metadata = _extract_video_metadata(message)
@@ -327,11 +420,21 @@ async def download_range(
 class DownloadQueue:
     """基于 Semaphore 的并发下载队列，集成数据库状态管理。"""
 
-    def __init__(self, client: TelegramClient, output_dir: str | Path, db: DownloadDB, max_concurrent: int = 3) -> None:
+    def __init__(
+        self,
+        client: TelegramClient,
+        output_dir: str | Path,
+        db: DownloadDB,
+        max_concurrent: int = 3,
+        retry_strategy: Optional[RetryStrategy] = None,
+        flood_coordinator: Optional[FloodWaitCoordinator] = None,
+    ) -> None:
         self._client = client
         self._output_dir = Path(output_dir)
         self._db = db
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._retry_strategy = retry_strategy
+        self._flood_coordinator = flood_coordinator or get_flood_coordinator()
 
     async def submit(self, message, channel: str, source: str = "cli", progress_callback: ProgressCallback = None) -> Path | None:
         """提交单个下载任务到队列。自动管理数据库状态。"""
@@ -343,12 +446,44 @@ class DownloadQueue:
         async with self._semaphore:
             self._db.update_status(channel, message.id, "downloading")
             try:
-                path = await download_message(self._client, message, self._output_dir, progress_callback)
-                if path is not None:
-                    self._db.update_status(channel, message.id, "completed", filename=path.name, file_size=path.stat().st_size if path.exists() else None)
+                result = await download_message(
+                    self._client, message, self._output_dir, progress_callback,
+                    channel=channel, db=self._db,
+                    retry_strategy=self._retry_strategy,
+                    flood_coordinator=self._flood_coordinator,
+                )
+                if result is not None:
+                    path = result.path if isinstance(result, DownloadResult) else result
+                    self._db.update_status(
+                        channel, message.id, "completed",
+                        filename=path.name,
+                        file_size=path.stat().st_size if path.exists() else None,
+                    )
                 else:
                     self._db.update_status(channel, message.id, "completed")
-                return path
+                return result
             except Exception as e:
                 self._db.update_status(channel, message.id, "failed", error_message=str(e))
                 raise
+
+    async def resume_pending_tasks(self) -> int:
+        """恢复待处理的任务（downloading 或 failed 状态）"""
+        pending_tasks = self._db.get_pending_tasks()
+        resumed_count = 0
+        logger.info("发现 %d 个待恢复的任务", len(pending_tasks))
+        
+        for task in pending_tasks:
+            try:
+                # 这里需要重新获取消息并提交下载，暂时跳过完整实现
+                # 实际项目中需要保存更多上下文信息以便恢复
+                logger.debug(
+                    "待恢复任务: channel=%s, message_id=%s, status=%s, "
+                    "downloaded=%s/%s bytes",
+                    task["channel"], task["message_id"], task["status"],
+                    task["downloaded_bytes"], task["total_bytes"],
+                )
+                # TODO: 完整实现需要额外保存消息上下文
+            except Exception as e:
+                logger.error("恢复任务失败: %s", e)
+                
+        return resumed_count

@@ -48,6 +48,18 @@ def _make_text_message(msg_id=2):
     return msg
 
 
+def _mock_iter_download(chunk_size=512, file_size=1024):
+    """创建一个模拟的 iter_download 异步迭代器。"""
+    async def mock_iter(*args, **kwargs):
+        offset = kwargs.get('offset', 0)
+        remaining = file_size - offset
+        while remaining > 0:
+            chunk = b'x' * min(chunk_size, remaining)
+            yield chunk
+            remaining -= len(chunk)
+    return mock_iter
+
+
 class TestIsVideo:
     def test_video_message(self):
         msg = _make_video_message()
@@ -114,7 +126,7 @@ class TestDownloadByLink:
         client.get_messages = AsyncMock(return_value=msg)
 
         out_file = tmp_path / "testchan_123_test.mp4"
-        client.download_media = AsyncMock(return_value=str(out_file))
+        client.iter_download = _mock_iter_download()
         # 创建假文件使 exists() 返回 True
         out_file.touch()
 
@@ -139,7 +151,7 @@ class TestDownloadRange:
         client = AsyncMock()
         msg1 = _make_video_message(msg_id=1)
         msg1.get_input_chat = AsyncMock(return_value=MagicMock(username="ch"))
-        client.download_media = AsyncMock(return_value=str(tmp_path / "file.mp4"))
+        client.iter_download = _mock_iter_download()
         (tmp_path / "file.mp4").touch()
 
         # get_messages 返回包含 None 的列表
