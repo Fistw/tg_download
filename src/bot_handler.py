@@ -26,29 +26,85 @@ async def _send_video_with_metadata(
     bot_client: TelegramClient,
     chat_id: Any,
     video_result: DownloadResult | Path,
+    download_config: Any | None = None,
 ):
-    """使用元数据发送视频，支持预览图和流媒体播放。"""
+    """使用元数据发送视频，支持预览图和流媒体播放，并优化上传速度。"""
+    import time
+    from pathlib import Path
+
     # 获取实际文件路径
     file_path = None
+    attributes = None
+    thumb = None
+    supports_streaming = True
+
     if isinstance(video_result, DownloadResult):
         file_path = video_result.path
+        attributes = video_result.metadata.attributes
+        thumb = video_result.metadata.thumb
+        supports_streaming = video_result.metadata.supports_streaming
         logger.info(f"📺 Sending video with metadata: {file_path}")
-        logger.info(f"   - Supports streaming: {video_result.metadata.supports_streaming}")
-        logger.info(f"   - Has attributes: {bool(video_result.metadata.attributes)}")
-        logger.info(f"   - Has thumbnail: {bool(video_result.metadata.thumb)}")
+        logger.info(f"   - Supports streaming: {supports_streaming}")
+        logger.info(f"   - Has attributes: {bool(attributes)}")
+        logger.info(f"   - Has thumbnail: {bool(thumb)}")
     else:
-        file_path = video_result
+        file_path = Path(video_result)
         logger.info(f"📺 Sending video without metadata: {file_path}")
-    
-    # 关键：设置 supports_streaming=True 来启用流媒体播放
+
+    # 获取文件大小
+    file_size_bytes = 0
+    if file_path.exists():
+        file_size_bytes = file_path.stat().st_size
+
+    # 确定上传分块大小
+    part_size_kb = 128  # 默认值，向后兼容
+    if download_config:
+        part_size_kb = download_config.upload_part_size_kb
+        # 检查是否是大文件，使用优化配置
+        threshold_bytes = download_config.upload_large_file_threshold_mb * 1024 * 1024
+        if file_size_bytes > threshold_bytes:
+            part_size_kb = download_config.upload_large_file_part_size_kb
+            logger.info(f"   📏 Detected large file: using part_size={part_size_kb}KB")
+
+    # 限制最大为 512KB（Telethon 限制）
+    part_size_kb = min(part_size_kb, 512)
+
+    logger.info(f"   Using part size: {part_size_kb} KB for file size: {file_size_bytes / (1024*1024):.2f} MB")
+
+    # 关键：先上传文件（设置 part_size_kb），然后发送
+    start_time = time.time()
     try:
-        logger.info(f"   Calling send_file with supports_streaming=True")
-        result = await bot_client.send_file(
-            chat_id, 
-            str(file_path), 
-            supports_streaming=True
+        # 先上传文件（使用优化的分块大小）
+        logger.info(f"   Uploading file to Telegram servers...")
+        uploaded_file = await bot_client.upload_file(
+            str(file_path),
+            part_size_kb=part_size_kb
         )
-        logger.info(f"   ✅ Video sent successfully!")
+
+        # 记录上传完成时间
+        upload_time = time.time() - start_time
+        speed_kb_s = (file_size_bytes / 1024) / upload_time if upload_time > 0 else 0
+        logger.info(f"   Upload completed in {upload_time:.2f}s, average speed: {speed_kb_s:.2f} KB/s")
+
+        # 然后发送
+        logger.info(f"   Calling send_file with uploaded file and supports_streaming={supports_streaming}")
+        send_kwargs = {
+            "supports_streaming": supports_streaming
+        }
+        if attributes:
+            send_kwargs["attributes"] = attributes
+        if thumb:
+            send_kwargs["thumb"] = thumb
+
+        result = await bot_client.send_file(
+            chat_id,
+            uploaded_file,
+            **send_kwargs
+        )
+
+        total_time = time.time() - start_time
+        total_speed_kb_s = (file_size_bytes / 1024) / total_time if total_time > 0 else 0
+        logger.info(f"   ✅ Video sent successfully! Total time: {total_time:.2f}s, total average speed: {total_speed_kb_s:.2f} KB/s")
     except Exception as e:
         logger.error(f"   ❌ Error sending video: {e}")
         import traceback
@@ -101,7 +157,7 @@ async def setup_bot_handlers(
 
             if file_path.exists() and file_path.stat().st_size < 2 * 1024 ** 3:
                 await event.reply("下载完成，正在发送文件...")
-                await _send_video_with_metadata(bot_client, event.chat_id, result)
+                await _send_video_with_metadata(bot_client, event.chat_id, result, config.download)
             else:
                 await event.reply(f"下载完成: {file_path}")
         except Exception as e:

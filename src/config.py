@@ -40,6 +40,10 @@ class DownloadConfig:
     enable_chunked_download: bool = False  # 是否启用分片下载
     chunk_size_mb: int = 50  # 每个分片的大小（MB）
     max_concurrent_chunks: int = 3  # 最大并发下载分片数
+    # 上传配置
+    upload_part_size_kb: int = 128  # 上传分块大小（KB），默认128KB保持向后兼容
+    upload_large_file_threshold_mb: int = 500  # 大文件阈值（MB），超过此值使用优化配置
+    upload_large_file_part_size_kb: int = 512  # 大文件上传分块大小（KB），最大512KB
 
 
 @dataclass
@@ -148,6 +152,9 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         enable_chunked_download=bool(dl_raw.get("enable_chunked_download", False)),
         chunk_size_mb=int(dl_raw.get("chunk_size_mb", 50)),
         max_concurrent_chunks=int(dl_raw.get("max_concurrent_chunks", 3)),
+        upload_part_size_kb=int(dl_raw.get("upload_part_size_kb", 128)),
+        upload_large_file_threshold_mb=int(dl_raw.get("upload_large_file_threshold_mb", 500)),
+        upload_large_file_part_size_kb=int(dl_raw.get("upload_large_file_part_size_kb", 512)),
     )
 
     mon_raw = raw.get("monitor", {})

@@ -28,6 +28,10 @@ download:
   enable_chunked_download: false  # 是否启用分片下载
   chunk_size_mb: 50  # 每个分片的大小（MB）
   max_concurrent_chunks: 3  # 最大并发下载分片数
+  # 上传配置（优化上传速度）
+  upload_part_size_kb: 128  # 上传分块大小（KB），默认 128，最大 512
+  upload_large_file_threshold_mb: 500  # 大文件阈值（MB），超过此值使用优化配置
+  upload_large_file_part_size_kb: 512  # 大文件上传分块大小（KB），建议设置为 512
 
 # WebDAV 服务器配置（用于群晖 NAS 访问）
 webdav_server:
