@@ -168,13 +168,13 @@ async def _cmd_serve(args, config) -> None:
     )
 
     # 初始化监控数据库
+    monitoring_db = None
     try:
         from src.monitoring_db import get_monitoring_db
         monitoring_db = get_monitoring_db(retention_days=7)
-        logger.info("监控数据库已初始化")
+        logging.info("监控数据库已初始化")
     except Exception as e:
-        logger.warning(f"无法初始化监控数据库: {e}")
-        monitoring_db = None
+        logging.warning(f"无法初始化监控数据库: {e}")
 
     # 启动 WebDAV 服务器
     webdav_server = None
@@ -188,9 +188,9 @@ async def _cmd_serve(args, config) -> None:
                 set_monitoring_db(monitoring_db)
             webdav_server.start()
         except Exception as e:
-            logger.error(f"无法启动服务器: {e}")
+            logging.error(f"无法启动服务器: {e}")
             import traceback
-            logger.error(traceback.format_exc())
+            logging.error(traceback.format_exc())
 
         if not args.no_monitor:
             await start_monitor(
