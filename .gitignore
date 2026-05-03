@@ -16,5 +16,6 @@ venv/
 
 downloads.db
 .trae/
+data/
 
 *_PRIVATE.md

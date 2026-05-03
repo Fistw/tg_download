@@ -71,7 +71,17 @@ async def _send_video_with_metadata(
 
     logger.info(f"   Using part size: {part_size_kb} KB for file size: {file_size_bytes / (1024*1024):.2f} MB")
 
-    # 关键：先上传文件（设置 part_size_kb），然后发送
+    # 初始化监控记录
+    monitoring_record_id = None
+    try:
+        from src.monitoring_db import get_monitoring_db
+        db = get_monitoring_db()
+        filename = file_path.name
+        monitoring_record_id = db.start_upload_task(filename, file_size_bytes)
+    except Exception:
+        pass
+
+    # 关键：先上传文件（设置分块大小），然后发送
     start_time = time.time()
     try:
         # 先上传文件（使用优化的分块大小）
@@ -105,10 +115,38 @@ async def _send_video_with_metadata(
         total_time = time.time() - start_time
         total_speed_kb_s = (file_size_bytes / 1024) / total_time if total_time > 0 else 0
         logger.info(f"   ✅ Video sent successfully! Total time: {total_time:.2f}s, total average speed: {total_speed_kb_s:.2f} KB/s")
+
+        # 更新监控记录
+        if monitoring_record_id:
+            try:
+                from src.monitoring_db import get_monitoring_db
+                db = get_monitoring_db()
+                db.complete_upload_task(
+                    monitoring_record_id,
+                    file_size_bytes,
+                    total_speed_kb_s,
+                    "completed"
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"   ❌ Error sending video: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        
+        # 更新监控记录为失败
+        if monitoring_record_id:
+            try:
+                from src.monitoring_db import get_monitoring_db
+                db = get_monitoring_db()
+                db.complete_upload_task(
+                    monitoring_record_id,
+                    0,
+                    0,
+                    "failed"
+                )
+            except Exception:
+                pass
 
 
 async def setup_bot_handlers(

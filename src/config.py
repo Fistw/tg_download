@@ -22,8 +22,8 @@ class DownloadConfig:
     chunk_size_kb: int = 512
     enable_reaction_download: bool = False
     send_download_to_allowed_users: bool = True
-    ask_before_send: bool = True  # 新增：是否在发送前询问用户
-    ask_timeout_seconds: int = 300  # 新增：询问超时时间（秒）
+    ask_before_send: bool = True  # 是否在发送前询问用户
+    ask_timeout_seconds: int = 300  # 询问超时时间（秒）
     # 重试策略配置
     max_retries: int = 5
     retry_base_delay: float = 1.0
@@ -41,8 +41,8 @@ class DownloadConfig:
     chunk_size_mb: int = 50  # 每个分片的大小（MB）
     max_concurrent_chunks: int = 3  # 最大并发下载分片数
     # 上传配置
-    upload_part_size_kb: int = 128  # 上传分块大小（KB），默认128KB保持向后兼容
-    upload_large_file_threshold_mb: int = 500  # 大文件阈值（MB），超过此值使用优化配置
+    upload_part_size_kb: int = 128  # 上传分块大小（KB）
+    upload_large_file_threshold_mb: int = 100  # 大文件阈值（MB）
     upload_large_file_part_size_kb: int = 512  # 大文件上传分块大小（KB），最大512KB
 
 
@@ -153,7 +153,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         chunk_size_mb=int(dl_raw.get("chunk_size_mb", 50)),
         max_concurrent_chunks=int(dl_raw.get("max_concurrent_chunks", 3)),
         upload_part_size_kb=int(dl_raw.get("upload_part_size_kb", 128)),
-        upload_large_file_threshold_mb=int(dl_raw.get("upload_large_file_threshold_mb", 500)),
+        upload_large_file_threshold_mb=int(dl_raw.get("upload_large_file_threshold_mb", 100)),
         upload_large_file_part_size_kb=int(dl_raw.get("upload_large_file_part_size_kb", 512)),
     )
 

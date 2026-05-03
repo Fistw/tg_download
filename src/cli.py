@@ -167,17 +167,30 @@ async def _cmd_serve(args, config) -> None:
         manager.user, config.download.output_dir, history, config.download.max_concurrent
     )
 
+    # 初始化监控数据库
+    try:
+        from src.monitoring_db import get_monitoring_db
+        monitoring_db = get_monitoring_db(retention_days=7)
+        logger.info("监控数据库已初始化")
+    except Exception as e:
+        logger.warning(f"无法初始化监控数据库: {e}")
+        monitoring_db = None
+
     # 启动 WebDAV 服务器
     webdav_server = None
     try:
-        if config.webdav_server.enable:
-            try:
-                webdav_server = WebDAVServer(config.webdav_server, config.download.output_dir)
-                webdav_server.start()
-            except Exception as e:
-                print(f"警告: 无法启动 WebDAV 服务器: {e}")
-                import traceback
-                traceback.print_exc()
+        # 初始化 WebDAV 服务器（总是启动，因为现在包含监控看板）
+        try:
+            webdav_server = WebDAVServer(config.webdav_server, config.download.output_dir)
+            # 设置监控数据库到 web 服务器
+            if monitoring_db:
+                from src.webdav_server import set_monitoring_db
+                set_monitoring_db(monitoring_db)
+            webdav_server.start()
+        except Exception as e:
+            logger.error(f"无法启动服务器: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
         if not args.no_monitor:
             await start_monitor(
@@ -191,11 +204,11 @@ async def _cmd_serve(args, config) -> None:
         if start_bot:
             await setup_bot_handlers(manager.bot, manager.user, config, history)
 
-        print("服务已启动，按 Ctrl+C 停止")
+        logger.info("服务已启动，按 Ctrl+C 停止")
         # 保持运行
         await manager.user.run_until_disconnected()
     except KeyboardInterrupt:
-        print("\n正在停止...")
+        logger.info("\n正在停止...")
     finally:
         if webdav_server:
             webdav_server.stop()

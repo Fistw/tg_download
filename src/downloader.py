@@ -160,6 +160,18 @@ async def _download_with_retry(
             downloaded_bytes=initial_offset,
         )
     
+    # 初始化监控记录
+    monitoring_record_id = None
+    download_start_time = None
+    try:
+        from src.monitoring_db import get_monitoring_db
+        monitoring_db = get_monitoring_db()
+        filename = file_path.name
+        monitoring_record_id = monitoring_db.start_download_task(message_id, filename, file_size)
+        download_start_time = asyncio.get_event_loop().time()
+    except Exception:
+        pass
+    
     attempt = 0
     downloaded = initial_offset
     while retry_strategy.should_retry(attempt):
@@ -184,6 +196,29 @@ async def _download_with_retry(
                     
                     if progress_callback and file_size > 0:
                         progress_callback(downloaded, file_size)
+            
+            # 计算下载时间和速度
+            download_time = 0
+            speed_kb_s = 0
+            if download_start_time:
+                download_time = asyncio.get_event_loop().time() - download_start_time
+                downloaded_bytes_total = downloaded - initial_offset
+                if download_time > 0:
+                    speed_kb_s = (downloaded_bytes_total / 1024) / download_time
+            
+            # 更新监控记录
+            if monitoring_record_id:
+                try:
+                    from src.monitoring_db import get_monitoring_db
+                    monitoring_db = get_monitoring_db()
+                    monitoring_db.complete_download_task(
+                        monitoring_record_id,
+                        file_size,
+                        speed_kb_s,
+                        "completed"
+                    )
+                except Exception:
+                    pass
             
             logger.info("下载完成：%s (%.2f MB)", file_path, downloaded / (1024 * 1024))
             return file_path
@@ -213,6 +248,19 @@ async def _download_with_retry(
                         downloaded_bytes=downloaded,
                         increment_retry=True,
                     )
+                # 更新监控记录
+                if monitoring_record_id:
+                    try:
+                        from src.monitoring_db import get_monitoring_db
+                        monitoring_db = get_monitoring_db()
+                        monitoring_db.complete_download_task(
+                            monitoring_record_id,
+                            downloaded,
+                            0,
+                            "failed"
+                        )
+                    except Exception:
+                        pass
                 raise
             
             delay = retry_strategy.get_delay(attempt)
