@@ -56,10 +56,12 @@ def get_system_metrics() -> dict:
 
 
 class MonitoringApp:
-    """简单的监控 WSGI 应用"""
+    """简单的监控 WSGI 应用，支持 HTTP Basic 认证"""
 
-    def __init__(self, static_dir: Path):
+    def __init__(self, static_dir: Path, username: str, password: str):
         self.static_dir = static_dir
+        self.username = username
+        self.password = password
         self.routes = {
             "/": self.handle_dashboard,
             "/dashboard": self.handle_dashboard,
@@ -69,8 +71,36 @@ class MonitoringApp:
             "/api/system": self.handle_api_system,
         }
 
+    def check_auth(self, environ):
+        """检查 HTTP Basic 认证"""
+        if not self.username or not self.password:
+            return True  # 没有配置用户名密码，跳过认证
+        
+        auth = environ.get("HTTP_AUTHORIZATION")
+        if auth is None:
+            return False
+        
+        if not auth.startswith("Basic "):
+            return False
+        
+        import base64
+        try:
+            decoded = base64.b64decode(auth[6:]).decode("utf-8")
+            user, passwd = decoded.split(":", 1)
+            return user == self.username and passwd == self.password
+        except Exception:
+            return False
+
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "/")
+        
+        # 检查认证
+        if not self.check_auth(environ):
+            start_response("401 Unauthorized", [
+                ("WWW-Authenticate", 'Basic realm="tg-download monitoring"'),
+                ("Content-Type", "text/plain; charset=utf-8")
+            ])
+            return [b"401 Unauthorized"]
         
         # 检查是否是静态文件
         if path.startswith("/static/"):
@@ -187,7 +217,7 @@ class MonitoringApp:
 
 
 class CombinedApp:
-    """组合 WSGI 应用（支持 WebDAV 和监控）"""
+    """组合 WSGI 应用（支持 WebDAV 和监控），监控需要认证，WebDAV 使用自己的认证"""
 
     def __init__(self, webdav_app: Optional[Callable], monitoring_app: MonitoringApp, webdav_prefix: str = "/"):
         self.webdav_app = webdav_app
@@ -197,11 +227,11 @@ class CombinedApp:
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "/")
         
-        # 监控路由
+        # 监控路由 - 使用监控应用（带认证）
         if path == "/" or path.startswith("/dashboard") or path.startswith("/api/") or path.startswith("/static/"):
             return self.monitoring_app(environ, start_response)
         
-        # WebDAV 路由
+        # WebDAV 路由 - 使用 WebDAV 应用（带自己的认证）
         if self.webdav_app:
             return self.webdav_app(environ, start_response)
         
@@ -268,7 +298,7 @@ class WebDAVServer:
                 wd_config = self._build_webdav_config()
                 webdav_app_obj = WsgiDAVApp(wd_config)
             
-            monitoring_app = MonitoringApp(self._static_dir)
+            monitoring_app = MonitoringApp(self._static_dir, self.config.username, self.config.password)
             combined_app = CombinedApp(
                 webdav_app_obj,
                 monitoring_app,
