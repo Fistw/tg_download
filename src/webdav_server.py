@@ -139,7 +139,11 @@ class MonitoringApp:
         """处理静态文件"""
         path = environ.get("PATH_INFO", "/")
         # 去除 /static 前缀
-        file_path = self.static_dir / path.lstrip("/")
+        if path.startswith("/static/"):
+            relative_path = path[len("/static/"):]
+        else:
+            relative_path = path.lstrip("/")
+        file_path = self.static_dir / relative_path
         
         if not file_path.exists() or file_path.is_dir():
             start_response("404 Not Found", [("Content-Type", "text/plain; charset=utf-8")])
