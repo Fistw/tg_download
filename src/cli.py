@@ -204,11 +204,11 @@ async def _cmd_serve(args, config) -> None:
         if start_bot:
             await setup_bot_handlers(manager.bot, manager.user, config, history)
 
-        logger.info("服务已启动，按 Ctrl+C 停止")
+        logging.info("服务已启动，按 Ctrl+C 停止")
         # 保持运行
         await manager.user.run_until_disconnected()
     except KeyboardInterrupt:
-        logger.info("\n正在停止...")
+        logging.info("\n正在停止...")
     finally:
         if webdav_server:
             webdav_server.stop()
