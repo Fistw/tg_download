@@ -18,6 +18,9 @@
 - **WebDAV 服务器** — 内置 WebDAV 服务器，让 NAS 可以直接挂载并同步下载目录
 - **NAS 自动同步** — 下载完成后自动通过 WebDAV 或 SFTP 同步到 NAS
 - **Bot 交互选择** — 下载完成后询问用户是否发送文件（默认不发送）
+- **Web 监控看板** — 实时查看下载和上传进度、系统指标
+- **健康检查** — 自动监控服务健康，失败时自动重启
+- **多线程服务** — 同时处理多个请求，避免单个大文件下载阻塞
 
 ## 快速开始
 
@@ -55,7 +58,7 @@ telegram:
 
 download:
   output_dir: "./downloads"
-  max_concurrent: 5  # 同时下载的最大文件数
+  max_concurrent: 3  # 同时下载的最大文件数
   chunk_size_kb: 2048  # 下载块大小（KB），推荐 2048（2MB）
   enable_reaction_download: false  # 是否启用点赞下载
   send_download_to_allowed_users: true  # 是否将下载的文件发送给允许的用户
@@ -71,6 +74,16 @@ webdav_server:
   username: ""  # 留空则不启用认证
   password: ""
   directory: ""  # 留空则使用 download.output_dir
+  # 监控看板认证（单独配置）
+  monitoring_username: ""
+  monitoring_password: ""
+  # 健康检查配置
+  health_check_enabled: true  # 是否启用健康检查
+  health_check_interval: 30  # 健康检查间隔（秒）
+  health_check_failure_threshold: 3  # 连续失败多少次触发重启
+  health_check_timeout: 5  # 健康检查超时（秒）
+  health_check_max_restarts_per_hour: 5  # 每小时最大重启次数
+  server_backlog: 128  # 服务器 socket 队列大小
 
 # NAS 同步配置（下载完成后自动上传到 NAS）
 nas_sync:
@@ -143,6 +156,22 @@ download:
 - 评论区消息（如 `https://t.me/channel/123?comment=456`）
 - **媒体组消息**（一条消息包含多个视频）
 
+### Web 监控看板
+
+当启用 WebDAV 服务器时，访问 `http://你的服务器:8080/dashboard` 即可查看：
+
+- 实时下载进度和速度图表
+- 系统资源使用（CPU、内存）
+- 健康检查状态和恢复历史
+
+访问监控看板需要使用 `monitoring_username` 和 `monitoring_password` 进行 HTTP Basic 认证。
+
+### 健康检查与自动恢复
+
+启用健康检查后，系统会定期检查 WebDAV 服务是否正常运行。如果发现服务无响应，会连续检查 `health_check_failure_threshold` 次，若均失败则自动重启服务。
+
+健康检查功能需要配合 systemd 使用，提供了示例文件 `tg-download.service.example`。
+
 ### 一键部署
 
 ```bash
@@ -153,15 +182,17 @@ download:
 
 ```
 src/
-├── cli.py             # CLI 入口
-├── client.py          # Telegram 客户端管理
-├── config.py          # 配置加载
-├── database.py        # SQLite 任务管理
-├── downloader.py      # 下载核心逻辑
+├── cli.py              # CLI 入口
+├── client.py           # Telegram 客户端管理
+├── config.py           # 配置加载
+├── database.py         # SQLite 任务管理
+├── downloader.py       # 下载核心逻辑
 ├── reaction_monitor.py # 点赞事件监控
-├── monitor.py         # 频道监控
-├── bot_handler.py     # Bot 命令处理
-└── utils.py           # 工具函数
+├── monitor.py          # 频道监控
+├── bot_handler.py      # Bot 命令处理
+├── monitoring_db.py    # 监控数据存储
+├── webdav_server.py    # WebDAV 服务器 + 监控看板
+└── utils.py            # 工具函数
 ```
 
 ## 与群晖 NAS 配合使用
@@ -221,7 +252,11 @@ src/
 
 1. **安装 cryptg 库**：`pip install cryptg`（C 语言实现的加密加速）
 2. **设置合适的 chunk size**：`chunk_size_kb: 2048`（2MB）
-3. **调整并发数**：`max_concurrent: 5`（根据网络情况调整）
+3. **调整并发数**：`max_concurrent: 3`（根据网络情况调整）
+4. **优化 TCP 参数**（可选，适用于 Linux 服务器）：
+   ```bash
+   sudo ./scripts/optimize-tcp.sh
+   ```
 
 ## 许可证
 

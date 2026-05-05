@@ -49,6 +49,7 @@ telegram:
 download:
   output_dir: "./downloads"     # 下载保存目录
   max_concurrent: 3             # 最大并发下载数
+  enable_reaction_download: true  # 启用点赞下载
 
 monitor:
   channels:                     # 需要自动监控的频道
@@ -62,6 +63,16 @@ monitor:
 bot:
   allowed_users:
     - 123456789                 # 允许使用 Bot 的 Telegram 用户 ID
+
+webdav_server:
+  enable: true
+  host: "0.0.0.0"
+  port: 8080
+  username: "webdav_user"      # WebDAV 用户名
+  password: "webdav_password"
+  monitoring_username: "monitor_user"  # 监控看板用户名
+  monitoring_password: "monitor_password"  # 监控看板密码
+  health_check_enabled: true
 ```
 
 > **获取你的用户 ID：** 在 Telegram 中给 [@userinfobot](https://t.me/userinfobot) 发消息即可查看。
@@ -96,26 +107,16 @@ nohup python3 -m src serve > tg_download.log 2>&1 &
 ./scripts/start.sh
 ```
 
-### 可选：systemd 服务配置
+### 推荐：systemd 服务配置（生产环境）
 
-创建 `/etc/systemd/system/tg-download.service`：
+使用项目提供的示例配置：
 
-```ini
-[Unit]
-Description=Telegram Video Downloader
-After=network.target
-
-[Service]
-Type=simple
-User=your_username
-WorkingDirectory=/path/to/tg_download
-ExecStart=/usr/bin/python3 -m src serve
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo cp tg-download.service.example /etc/systemd/system/tg-download.service
+sudo nano /etc/systemd/system/tg-download.service  # 修改 User 和 WorkingDirectory
 ```
+
+然后启动服务：
 
 ```bash
 sudo systemctl daemon-reload
@@ -124,8 +125,38 @@ sudo systemctl start tg-download
 
 # 查看状态
 sudo systemctl status tg-download
-journalctl -u tg-download -f
+journalctl -u tg-download -f  # 实时查看日志
 ```
+
+使用 systemd 有几个好处：
+- 开机自动启动
+- 服务崩溃时自动重启
+- 与健康检查功能完美配合
+- 管理方便
+
+---
+
+## Web 监控看板
+
+当启用 WebDAV 服务器后，访问 `http://你的服务器:8080/dashboard` 即可查看：
+
+- 实时下载和上传进度
+- 系统资源使用（CPU、内存）
+- 健康检查状态和恢复历史
+- 下载和上传速度图表
+
+访问监控看板需要使用你在配置中设置的 `monitoring_username` 和 `monitoring_password`。
+
+### 健康检查与自动恢复
+
+健康检查功能默认启用，每隔 30 秒检查一次服务是否正常响应。如果连续 3 次检查失败，程序会自动退出，systemd 会自动重启服务。
+
+健康检查功能的行为可以通过以下配置调整：
+- `health_check_enabled`: 是否启用健康检查
+- `health_check_interval`: 检查间隔（秒）
+- `health_check_failure_threshold`: 连续失败多少次后重启
+- `health_check_timeout`: 健康检查超时（秒）
+- `health_check_max_restarts_per_hour`: 每小时最多重启次数（防止无限重启）
 
 ---
 
@@ -154,6 +185,13 @@ python -m src download "https://t.me/channel/123" -o /path/to/output
 
 下载完成后，Bot 会将文件直接发送给你（文件 < 2GB 时）。
 
+### 点赞下载
+
+对包含视频的消息点赞，系统会自动下载并发送给你！支持：
+- 主频道消息
+- 评论区消息
+- 媒体组消息（一条消息包含多个视频）
+
 ---
 
 ## 迁移到新机器
@@ -168,6 +206,34 @@ scp config.yaml user_session.session user@new_server:/path/to/tg_download/
 - `user_session.session` — 登录会话（有了它不需要重新登录）
 - `downloads/` — 已下载的文件（可选）
 - `downloads.db` — 下载历史记录（可选）
+- `data/` — 监控数据（可选）
+
+---
+
+## 性能优化
+
+### 1. 优化 TCP 参数
+
+对于 Linux 服务器，可以通过以下命令优化网络参数：
+
+```bash
+sudo ./scripts/optimize-tcp.sh
+```
+
+### 2. 启用加密加速
+
+```bash
+pip install cryptg
+```
+
+### 3. 调整下载块大小
+
+在 `config.yaml` 中设置：
+
+```yaml
+download:
+  chunk_size_kb: 2048  # 2MB
+```
 
 ---
 
@@ -180,6 +246,8 @@ scp config.yaml user_session.session user@new_server:/path/to/tg_download/
 | `AuthKeyUnregisteredError` | session 文件失效，删除 `*.session` 后重新登录 |
 | Bot 不响应 | 检查 `bot_token` 是否正确，`allowed_users` 是否包含你的 ID |
 | 无法下载私有频道 | 确保你的 Telegram 账号已加入该频道 |
+| 监控看板无法访问 | 检查防火墙是否允许 8080 端口，检查 `monitoring_username` 配置 |
+| 服务频繁重启 | 检查 `health_check_max_restarts_per_hour` 配置 |
 
 ---
 
@@ -188,3 +256,4 @@ scp config.yaml user_session.session user@new_server:/path/to/tg_download/
 - `config.yaml`、`user_session.session`、`.env` 已在 `.gitignore` 中，不会被提交到 git
 - session 文件等同于登录凭证，请妥善保管
 - 建议使用环境变量传递敏感信息，而非明文写在配置文件中
+- WebDAV 和监控看板建议设置强密码，避免被未授权访问
