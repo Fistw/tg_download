@@ -8,7 +8,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional, Callable
+from socketserver import ThreadingMixIn
 from wsgiref.simple_server import make_server, WSGIServer
+
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """处理每个请求在独立线程中的 WSGI 服务器"""
+    daemon_threads = True
 
 try:
     from wsgidav import wsgidav_app
@@ -58,23 +64,50 @@ def get_system_metrics() -> dict:
 class MonitoringApp:
     """简单的监控 WSGI 应用，支持 HTTP Basic 认证"""
 
-    def __init__(self, static_dir: Path, username: str, password: str):
+    def __init__(self, static_dir: Path, monitoring_username: str, monitoring_password: str):
         self.static_dir = static_dir
-        self.username = username
-        self.password = password
+        self.monitoring_username = monitoring_username
+        self.monitoring_password = monitoring_password
         self.routes = {
-            "/": self.handle_dashboard,
             "/dashboard": self.handle_dashboard,
             "/api/dashboard/stats": self.handle_api_stats,
             "/api/downloads": self.handle_api_downloads,
             "/api/uploads": self.handle_api_uploads,
             "/api/system": self.handle_api_system,
+            "/api/health/checks": self.handle_api_health_checks,
+            "/api/health/recoveries": self.handle_api_recoveries,
+            "/health": self.handle_health_endpoint,
         }
+    
+    def handle_health_endpoint(self, environ, start_response):
+        """简单的健康检查端点，返回 200 OK"""
+        start_response("200 OK", [("Content-Type", "text/plain; charset=utf-8")])
+        return [b"OK"]
+    
+    def handle_api_health_checks(self, environ, start_response):
+        """获取健康检查历史"""
+        data = []
+        if _monitoring_db:
+            data = _monitoring_db.get_health_checks(hours=24, limit=100)
+        response = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+        return [response]
+    
+    def handle_api_recoveries(self, environ, start_response):
+        """获取恢复历史"""
+        data = []
+        if _monitoring_db:
+            data = _monitoring_db.get_recovery_history(hours=24, limit=20)
+        response = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+        return [response]
 
     def check_auth(self, environ):
         """检查 HTTP Basic 认证"""
-        if not self.username or not self.password:
-            return True  # 没有配置用户名密码，跳过认证
+        if not self.monitoring_username or not self.monitoring_password:
+            # 没有配置监控用户名密码，跳过认证，但记录警告
+            logger.warning("监控看板未配置认证，任何人都可以访问！")
+            return True
         
         auth = environ.get("HTTP_AUTHORIZATION")
         if auth is None:
@@ -87,14 +120,18 @@ class MonitoringApp:
         try:
             decoded = base64.b64decode(auth[6:]).decode("utf-8")
             user, passwd = decoded.split(":", 1)
-            return user == self.username and passwd == self.password
+            return user == self.monitoring_username and passwd == self.monitoring_password
         except Exception:
             return False
 
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "/")
         
-        # 检查认证
+        # 健康检查端点跳过认证
+        if path == "/health":
+            return self.handle_health_endpoint(environ, start_response)
+        
+        # 其他路由检查认证
         if not self.check_auth(environ):
             start_response("401 Unauthorized", [
                 ("WWW-Authenticate", 'Basic realm="tg-download monitoring"'),
@@ -231,8 +268,13 @@ class CombinedApp:
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "/")
         
+        # 健康检查端点 - 直接处理返回
+        if path == "/health":
+            start_response("200 OK", [("Content-Type", "text/plain; charset=utf-8")])
+            return [b"OK"]
+        
         # 监控路由 - 使用监控应用（带认证）
-        if path == "/" or path.startswith("/dashboard") or path.startswith("/api/") or path.startswith("/static/"):
+        if path.startswith("/dashboard") or path.startswith("/api/") or path.startswith("/static/"):
             return self.monitoring_app(environ, start_response)
         
         # WebDAV 路由 - 使用 WebDAV 应用（带自己的认证）
@@ -252,6 +294,9 @@ class WebDAVServer:
         self._stop_event = threading.Event()
         self._httpd: Optional[WSGIServer] = None
         self._static_dir = Path(__file__).parent.parent / "static"
+        self._health_check_thread: Optional[threading.Thread] = None
+        self._failure_count = 0
+        self._restart_timestamps: list[float] = []
 
     def _get_mount_dir(self) -> Path:
         """获取实际挂载的目录"""
@@ -294,6 +339,86 @@ class WebDAVServer:
 
         return config
 
+    def _run_health_check(self):
+        """运行健康检查 - 通过 socket 直接检查端口"""
+        import socket
+        logger.info(f"健康检查线程启动，_monitoring_db={_monitoring_db}")
+        
+        # 先等 10 秒，让服务器完全启动
+        logger.info(f"等待 10 秒让服务器启动完成")
+        if self._stop_event.wait(10):
+            return
+        
+        while not self._stop_event.is_set():
+            try:
+                start_time = time.time()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(self.config.health_check_timeout)
+                result = sock.connect_ex(('127.0.0.1', self.config.port))
+                sock.close()
+                
+                if result == 0:
+                    response_time = (time.time() - start_time) * 1000
+                    self._failure_count = 0
+                    if _monitoring_db:
+                        try:
+                            _monitoring_db.record_health_check("success", response_time)
+                            logger.info(f"健康检查成功，已记录")
+                        except Exception as record_err:
+                            logger.error(f"记录健康检查失败: {record_err}")
+                    else:
+                        logger.info(f"健康检查成功，_monitoring_db 未设置，不记录")
+                    logger.debug(f"健康检查成功，响应时间: {response_time:.2f}ms")
+                else:
+                    raise Exception(f"Socket connection failed, result={result}")
+            except Exception as e:
+                response_time = (time.time() - start_time) * 1000
+                self._failure_count += 1
+                error_msg = str(e)
+                if _monitoring_db:
+                    try:
+                        _monitoring_db.record_health_check("failed", response_time, error_msg)
+                    except Exception as record_err:
+                        logger.error(f"记录健康检查失败: {record_err}")
+                logger.warning(f"健康检查失败 ({self._failure_count}/{self.config.health_check_failure_threshold}): {error_msg}")
+                
+                # 检查是否需要触发恢复
+                if self._failure_count >= self.config.health_check_failure_threshold:
+                    self._attempt_recovery()
+            
+            # 等待下一次检查
+            self._stop_event.wait(self.config.health_check_interval)
+    
+    def _attempt_recovery(self):
+        """尝试恢复服务 - 通过退出让 systemd 重启"""
+        # 检查重启频率限制
+        now = time.time()
+        hour_ago = now - 3600
+        self._restart_timestamps = [t for t in self._restart_timestamps if t > hour_ago]
+        
+        if len(self._restart_timestamps) >= self.config.health_check_max_restarts_per_hour:
+            logger.error(f"重启频率超过限制（{len(self._restart_timestamps)}次/小时），跳过恢复")
+            return
+        
+        # 执行重启
+        logger.warning("触发服务恢复机制 - 退出进程让 systemd 重启")
+        if _monitoring_db:
+            _monitoring_db.record_recovery(
+                reason=f"健康检查连续失败{self._failure_count}次",
+                action_taken="restart"
+            )
+        
+        # 记录重启时间
+        self._restart_timestamps.append(time.time())
+        self._failure_count = 0
+        
+        # 停止服务器和主线程
+        self.stop()
+        
+        # 退出进程让 systemd 重启
+        import sys
+        sys.exit(1)
+
     def _run_server(self):
         """在独立线程中运行服务器"""
         try:
@@ -302,7 +427,7 @@ class WebDAVServer:
                 wd_config = self._build_webdav_config()
                 webdav_app_obj = WsgiDAVApp(wd_config)
             
-            monitoring_app = MonitoringApp(self._static_dir, self.config.username, self.config.password)
+            monitoring_app = MonitoringApp(self._static_dir, self.config.monitoring_username, self.config.monitoring_password)
             combined_app = CombinedApp(
                 webdav_app_obj,
                 monitoring_app,
@@ -319,13 +444,23 @@ class WebDAVServer:
             
             metrics_thread = threading.Thread(target=collect_system_metrics, daemon=True)
             metrics_thread.start()
+            
+            # 启动健康检查线程
+            if self.config.health_check_enabled:
+                self._health_check_thread = threading.Thread(target=self._run_health_check, daemon=True)
+                self._health_check_thread.start()
+                logger.info(f"健康检查已启用，间隔: {self.config.health_check_interval}秒")
 
+            # 创建服务器（使用多线程）
             self._httpd = make_server(
                 self.config.host,
                 self.config.port,
                 combined_app,
-                server_class=WSGIServer
+                server_class=ThreadingWSGIServer
             )
+            # 设置 backlog
+            if hasattr(self._httpd, 'request_queue_size'):
+                self._httpd.request_queue_size = self.config.server_backlog
 
             logger.info(f"服务器启动在 http://{self.config.host}:{self.config.port}")
             logger.info(f"监控看板: http://{self.config.host}:{self.config.port}/dashboard")

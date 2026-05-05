@@ -55,6 +55,15 @@ class WebDAVServerConfig:
     username: str = ""
     password: str = ""
     directory: str = ""  # 留空则使用 download.output_dir
+    # 监控看板认证配置（单独配置）
+    monitoring_username: str = ""
+    monitoring_password: str = ""
+    health_check_enabled: bool = True
+    health_check_interval: int = 30
+    health_check_failure_threshold: int = 3
+    health_check_timeout: int = 5
+    health_check_max_restarts_per_hour: int = 5
+    server_backlog: int = 128
 
 
 @dataclass
@@ -190,6 +199,14 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         username=os.environ.get("WEBDAV_USERNAME", webdav_raw.get("username", "")),
         password=os.environ.get("WEBDAV_PASSWORD", webdav_raw.get("password", "")),
         directory=webdav_raw.get("directory", ""),
+        monitoring_username=os.environ.get("MONITORING_USERNAME", webdav_raw.get("monitoring_username", "")),
+        monitoring_password=os.environ.get("MONITORING_PASSWORD", webdav_raw.get("monitoring_password", "")),
+        health_check_enabled=bool(webdav_raw.get("health_check_enabled", True)),
+        health_check_interval=int(webdav_raw.get("health_check_interval", 30)),
+        health_check_failure_threshold=int(webdav_raw.get("health_check_failure_threshold", 3)),
+        health_check_timeout=int(webdav_raw.get("health_check_timeout", 5)),
+        health_check_max_restarts_per_hour=int(webdav_raw.get("health_check_max_restarts_per_hour", 5)),
+        server_backlog=int(webdav_raw.get("server_backlog", 128)),
     )
 
     nas_raw = raw.get("nas_sync", {})

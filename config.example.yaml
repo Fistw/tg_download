@@ -35,13 +35,23 @@ download:
 
 # WebDAV 服务器配置（用于群晖 NAS 访问）
 webdav_server:
-  enable: false
+  enable: true
   host: "0.0.0.0"
   port: 8080
   mount_path: "/"
   username: ""  # WebDAV 用户名（留空则不启用认证）
   password: ""  # WebDAV 密码
   directory: ""  # 留空则使用 download.output_dir
+  # 监控看板认证配置（单独配置）
+  monitoring_username: ""  # 监控看板用户名
+  monitoring_password: ""  # 监控看板密码
+  # 健康检查配置
+  health_check_enabled: true  # 是否启用健康检查
+  health_check_interval: 30  # 健康检查间隔（秒）
+  health_check_failure_threshold: 3  # 连续失败多少次触发重启
+  health_check_timeout: 5  # 健康检查超时时间（秒）
+  health_check_max_restarts_per_hour: 5  # 每小时最大重启次数
+  server_backlog: 128  # 服务器 socket 监听队列大小
 
 # NAS 同步配置（可选，下载后自动上传到 NAS）
 nas_sync:

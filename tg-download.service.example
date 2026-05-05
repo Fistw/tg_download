@@ -1,0 +1,37 @@
+[Unit]
+Description=Telegram Video Downloader Service
+Documentation=https://github.com/your-repo/tg-download
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/workspace/tg-download
+ExecStart=/root/.pyenv/shims/python -m src serve
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=5
+
+# 性能优化
+LimitNOFILE=65536
+Nice=-10
+
+# 日志配置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tg-download
+OOMScoreAdjust=-1000
+
+# 安全配置
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target

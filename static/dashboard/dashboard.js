@@ -95,6 +95,54 @@ function initCharts() {
     });
 }
 
+// 更新健康检查显示
+function updateHealthCheck(data) {
+    const healthData = data.health_check;
+    
+    // 更新健康状态图标
+    const healthIcon = document.getElementById('health-status-icon');
+    if (healthData.failed_checks_24h > 0) {
+        healthIcon.textContent = '🟡';
+    } else {
+        healthIcon.textContent = '🟢';
+    }
+    
+    // 更新检查统计
+    document.getElementById('health-total-checks').textContent = healthData.total_checks_24h;
+    document.getElementById('health-failed-checks').textContent = healthData.failed_checks_24h;
+    
+    // 更新最后成功时间
+    const lastSuccessEl = document.getElementById('health-last-success');
+    if (healthData.last_success) {
+        const lastSuccessDate = new Date(healthData.last_success);
+        lastSuccessEl.textContent = `最后成功: ${lastSuccessDate.toLocaleString('zh-CN')}`;
+    } else {
+        lastSuccessEl.textContent = '最后成功: -';
+    }
+}
+
+// 更新恢复历史
+function updateRecoveryHistory(data) {
+    const container = document.getElementById('recovery-history');
+    if (!data || data.length === 0) {
+        container.innerHTML = '<p class="text-slate-500 text-sm">暂无恢复记录</p>';
+        return;
+    }
+    
+    container.innerHTML = data.slice(0, 5).map(item => {
+        const date = new Date(item.created_at);
+        return `
+            <div class="bg-slate-800/50 rounded p-3 border border-yellow-900/30">
+                <div class="flex justify-between items-start">
+                    <span class="text-yellow-400 font-medium">${item.action_taken}</span>
+                    <span class="text-slate-500 text-xs">${date.toLocaleString('zh-CN')}</span>
+                </div>
+                <p class="text-slate-400 text-sm mt-1">${item.reason}</p>
+            </div>
+        `;
+    }).join('');
+}
+
 // 更新统计卡片
 function updateStats(data) {
     // 下载统计
@@ -116,6 +164,11 @@ function updateStats(data) {
     document.getElementById('memory-bar').style.width = `${memPercent}%`;
     document.getElementById('cpu-percent').textContent = `${cpuPercent}%`;
     document.getElementById('cpu-bar').style.width = `${cpuPercent}%`;
+    
+    // 更新健康检查信息
+    if (data.health_check) {
+        updateHealthCheck(data);
+    }
     
     // 更新时间
     document.getElementById('last-updated').textContent = new Date().toLocaleString('zh-CN');
@@ -203,6 +256,11 @@ async function refreshData() {
         const ulResp = await fetch('/api/uploads');
         const ulData = await ulResp.json();
         updateUploadTable(ulData);
+        
+        // 获取恢复历史
+        const recResp = await fetch('/api/health/recoveries');
+        const recData = await recResp.json();
+        updateRecoveryHistory(recData);
         
         // 更新图表
         updateCharts(dlData, ulData);
