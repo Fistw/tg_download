@@ -178,6 +178,118 @@ async def _send_files_to_user(bot_client, user_id, downloaded_paths):
         logger.error(traceback.format_exc())
 
 
+async def _download_message_via_event(
+    client, message, peer, config, nas_syncer, bot_client=None
+):
+    """共用的下载消息逻辑"""
+    msg_id = message.id
+    
+    message_link = ""
+    if hasattr(peer, 'channel_id'):
+        message_link = f"https://t.me/c/{peer.channel_id}/{msg_id}"
+    elif hasattr(peer, 'chat_id'):
+        message_link = f"https://t.me/{peer.chat_id}/{msg_id}"
+    elif hasattr(peer, 'user_id'):
+        message_link = f"https://t.me/{peer.user_id}/{msg_id}"
+    
+    if bot_client and config.download.send_download_to_allowed_users and config.bot.allowed_users:
+        for user_id in config.bot.allowed_users:
+            try:
+                await bot_client.send_message(user_id, f"💖 检测到触发！正在下载...\n{message_link}")
+            except Exception as e:
+                logger.error(f"Failed to send notification to user {user_id}: {e}")
+    
+    logger.info("Downloading all videos in message!")
+    downloaded_paths = await download_all_videos_in_message(
+        client, message, config.download.output_dir, 
+        chunk_size_kb=config.download.chunk_size_kb
+    )
+    
+    logger.info(f"✅ Download completed! Downloaded {len(downloaded_paths)} files")
+    
+    if config.nas_sync.enable and downloaded_paths:
+        for path in downloaded_paths:
+            try:
+                await nas_syncer.sync_file(path)
+            except Exception as e:
+                logger.warning(f"NAS 同步失败: {e}")
+    
+    if config.download.enable_cache_cleanup:
+        logger.info("🧹 自动清理本地缓存...")
+        try:
+            cleanup_result = cleanup_cache(
+                Path(config.download.output_dir),
+                config.download.cache_retention_days,
+                config.download.max_cache_size_gb
+            )
+            logger.info(f"✅ 缓存清理完成：删除 {len(cleanup_result.deleted_files)} 个文件")
+        except Exception as e:
+            logger.error(f"❌ 缓存清理失败: {e}")
+    
+    if bot_client and config.download.send_download_to_allowed_users and config.bot.allowed_users:
+        for user_id in config.bot.allowed_users:
+            try:
+                if config.download.ask_before_send:
+                    if BUTTON_AVAILABLE:
+                        callback_prefix = f"dl_{user_id}_{msg_id}"
+                        callback_send = f"{callback_prefix}_send"
+                        question_msg = await bot_client.send_message(
+                            user_id,
+                            f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。",
+                            buttons=[Button.inline("📤 发送", data=callback_send)]
+                        )
+                        
+                        should_send_event = asyncio.Event()
+                        _pending_tasks[user_id] = (question_msg.id, should_send_event, downloaded_paths)
+                        _callback_tasks[callback_send] = (user_id, should_send_event, downloaded_paths)
+                        
+                        try:
+                            await asyncio.wait_for(should_send_event.wait(), timeout=config.download.ask_timeout_seconds)
+                            should_send = should_send_event.is_set()
+                        except asyncio.TimeoutError:
+                            should_send = False
+                            try:
+                                await bot_client.edit_message(user_id, question_msg.id, 
+                                    f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n(⏰ 已超时)")
+                            except Exception as e:
+                                logger.warning(f"编辑消息失败: {e}")
+                        finally:
+                            if user_id in _pending_tasks:
+                                del _pending_tasks[user_id]
+                            if callback_send in _callback_tasks:
+                                del _callback_tasks[callback_send]
+                        
+                        if should_send:
+                            await _send_files_to_user(bot_client, user_id, downloaded_paths)
+                    else:
+                        question_msg = await bot_client.send_message(
+                            user_id,
+                            f"✅ 下载完成！共 {len(downloaded_paths)} 个文件。\n\n是否发送？\n"
+                            f"- \"是\" 或 \"y\" 发送\n- \"否\" 或 \"n\" 不发送\n\n"
+                            f"({config.download.ask_timeout_seconds} 秒后默认不发送)"
+                        )
+                        
+                        should_send_event = asyncio.Event()
+                        _pending_tasks[user_id] = (question_msg.id, should_send_event, downloaded_paths)
+                        
+                        try:
+                            await asyncio.wait_for(should_send_event.wait(), timeout=config.download.ask_timeout_seconds)
+                            should_send = should_send_event.is_set()
+                        except asyncio.TimeoutError:
+                            should_send = False
+                            await bot_client.send_message(user_id, "⏰ 超时，默认不发送文件。")
+                        finally:
+                            if user_id in _pending_tasks:
+                                del _pending_tasks[user_id]
+                        
+                        if should_send:
+                            await _send_files_to_user(bot_client, user_id, downloaded_paths)
+                else:
+                    await _send_files_to_user(bot_client, user_id, downloaded_paths)
+            except Exception as e:
+                logger.error(f"Failed to send to user {user_id}: {e}")
+
+
 async def start_reaction_monitor(client: TelegramClient, config: AppConfig, download_queue=None, history=None, bot_client=None):
     """启动点赞自动下载监控"""
     if not config.download.enable_reaction_download:
@@ -188,6 +300,59 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
 
     logger.info("✅ Reaction download function enabled!")
     logger.info("🚀 Reaction monitor started, waiting for likes!")
+
+    @client.on(events.NewMessage())
+    async def on_new_message(event):
+        """监听新消息，处理回复关键词触发下载"""
+        try:
+            if event.is_reply:
+                reply_msg = await event.get_reply_message()
+                if not reply_msg:
+                    return
+                
+                should_trigger = False
+                if event.message.text:
+                    text = event.message.text.strip().lower()
+                    if text in ['下载', 'save', 's']:
+                        should_trigger = True
+                
+                if event.message.text and event.message.text.strip() == '👍':
+                    should_trigger = True
+                
+                if should_trigger:
+                    logger.info(f"✅ Reply trigger detected! Downloading replied message...")
+                    
+                    try:
+                        from telethon.tl.types import PeerUser, PeerChat, PeerChannel
+                        if hasattr(event, 'input_chat'):
+                            peer = event.input_chat
+                        elif hasattr(event, 'chat_id'):
+                            if isinstance(event.chat_id, int):
+                                if event.chat_id > 0:
+                                    peer = PeerUser(event.chat_id)
+                                else:
+                                    peer = PeerChat(-event.chat_id)
+                            else:
+                                peer = event.chat_id
+                        else:
+                            peer = await event.get_input_chat()
+                        
+                        await _download_message_via_event(
+                            client=client,
+                            message=reply_msg,
+                            peer=peer,
+                            config=config,
+                            nas_syncer=nas_syncer,
+                            bot_client=bot_client
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ Error processing reply download: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+        except Exception as e:
+            logger.error(f"❌ Error in NewMessage handler: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     @client.on(events.Raw())
     async def on_raw_update(event_or_update):

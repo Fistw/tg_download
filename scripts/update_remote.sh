@@ -82,6 +82,7 @@ rsync -avz --delete \
   --exclude="config.yaml" \
   --exclude="downloads/" \
   --exclude="*.db" \
+  --exclude="logs/" \
   ./ "$REMOTE_HOST:$REMOTE_PATH/"
 
 if [ $? -ne 0 ]; then

@@ -8,13 +8,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional, Callable
-from socketserver import ThreadingMixIn
 from wsgiref.simple_server import make_server, WSGIServer
-
-
-class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
-    """处理每个请求在独立线程中的 WSGI 服务器"""
-    daemon_threads = True
 
 try:
     from wsgidav import wsgidav_app
@@ -64,11 +58,12 @@ def get_system_metrics() -> dict:
 class MonitoringApp:
     """简单的监控 WSGI 应用，支持 HTTP Basic 认证"""
 
-    def __init__(self, static_dir: Path, monitoring_username: str, monitoring_password: str):
+    def __init__(self, static_dir: Path, username: str, password: str):
         self.static_dir = static_dir
-        self.monitoring_username = monitoring_username
-        self.monitoring_password = monitoring_password
+        self.username = username
+        self.password = password
         self.routes = {
+            "/": self.handle_dashboard,
             "/dashboard": self.handle_dashboard,
             "/api/dashboard/stats": self.handle_api_stats,
             "/api/downloads": self.handle_api_downloads,
@@ -104,10 +99,8 @@ class MonitoringApp:
 
     def check_auth(self, environ):
         """检查 HTTP Basic 认证"""
-        if not self.monitoring_username or not self.monitoring_password:
-            # 没有配置监控用户名密码，跳过认证，但记录警告
-            logger.warning("监控看板未配置认证，任何人都可以访问！")
-            return True
+        if not self.username or not self.password:
+            return True  # 没有配置用户名密码，跳过认证
         
         auth = environ.get("HTTP_AUTHORIZATION")
         if auth is None:
@@ -120,7 +113,7 @@ class MonitoringApp:
         try:
             decoded = base64.b64decode(auth[6:]).decode("utf-8")
             user, passwd = decoded.split(":", 1)
-            return user == self.monitoring_username and passwd == self.monitoring_password
+            return user == self.username and passwd == self.password
         except Exception:
             return False
 
@@ -274,7 +267,7 @@ class CombinedApp:
             return [b"OK"]
         
         # 监控路由 - 使用监控应用（带认证）
-        if path.startswith("/dashboard") or path.startswith("/api/") or path.startswith("/static/"):
+        if path == "/" or path.startswith("/dashboard") or path.startswith("/api/") or path.startswith("/static/"):
             return self.monitoring_app(environ, start_response)
         
         # WebDAV 路由 - 使用 WebDAV 应用（带自己的认证）
@@ -427,7 +420,7 @@ class WebDAVServer:
                 wd_config = self._build_webdav_config()
                 webdav_app_obj = WsgiDAVApp(wd_config)
             
-            monitoring_app = MonitoringApp(self._static_dir, self.config.monitoring_username, self.config.monitoring_password)
+            monitoring_app = MonitoringApp(self._static_dir, self.config.username, self.config.password)
             combined_app = CombinedApp(
                 webdav_app_obj,
                 monitoring_app,
@@ -451,12 +444,12 @@ class WebDAVServer:
                 self._health_check_thread.start()
                 logger.info(f"健康检查已启用，间隔: {self.config.health_check_interval}秒")
 
-            # 创建服务器（使用多线程）
+            # 创建服务器
             self._httpd = make_server(
                 self.config.host,
                 self.config.port,
                 combined_app,
-                server_class=ThreadingWSGIServer
+                server_class=WSGIServer
             )
             # 设置 backlog
             if hasattr(self._httpd, 'request_queue_size'):

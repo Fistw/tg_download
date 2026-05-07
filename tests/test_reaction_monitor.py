@@ -37,6 +37,116 @@ class TestIsValidReactionEvent:
         assert msg_id is None
         assert chat_id is None
 
+    def test_returns_true_with_user_id_peer(self):
+        from telethon.tl.types import UpdateMessageReactions
+        
+        event = MagicMock()
+        update = MagicMock(spec=UpdateMessageReactions)
+        update.msg_id = 12345
+        peer = type('UserPeer', (), {})()
+        peer.user_id = 98765
+        update.peer = peer
+        event.original_update = update
+        
+        is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
+        
+        assert is_valid is True
+        assert msg_id == 12345
+        assert chat_id == "98765"
+
+    def test_returns_true_with_channel_id_peer(self):
+        from telethon.tl.types import UpdateMessageReactions
+        
+        event = MagicMock()
+        update = MagicMock(spec=UpdateMessageReactions)
+        update.msg_id = 12345
+        peer = type('ChannelPeer', (), {})()
+        peer.channel_id = 123456789
+        update.peer = peer
+        event.original_update = update
+        
+        is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
+        
+        assert is_valid is True
+        assert msg_id == 12345
+        assert chat_id == "-100123456789"
+
+    def test_returns_true_with_positive_chat_id_peer(self):
+        from telethon.tl.types import UpdateMessageReactions
+        
+        event = MagicMock()
+        update = MagicMock(spec=UpdateMessageReactions)
+        update.msg_id = 12345
+        peer = type('ChatPeer', (), {})()
+        peer.chat_id = 98765
+        update.peer = peer
+        event.original_update = update
+        
+        is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
+        
+        assert is_valid is True
+        assert msg_id == 12345
+        assert chat_id == "-98765"
+
+    def test_returns_true_with_negative_chat_id_peer(self):
+        from telethon.tl.types import UpdateMessageReactions
+        
+        event = MagicMock()
+        update = MagicMock(spec=UpdateMessageReactions)
+        update.msg_id = 12345
+        peer = type('ChatPeer', (), {})()
+        peer.chat_id = -98765
+        update.peer = peer
+        event.original_update = update
+        
+        is_valid, msg_id, chat_id = _is_valid_reaction_event(event)
+        
+        assert is_valid is True
+        assert msg_id == 12345
+        assert chat_id == "-98765"
+
+    def test_without_original_update_directly_passed(self):
+        from telethon.tl.types import UpdateMessageReactions
+        
+        update = MagicMock(spec=UpdateMessageReactions)
+        update.msg_id = 12345
+        peer = type('UserPeer', (), {})()
+        peer.user_id = 98765
+        update.peer = peer
+        
+        is_valid, msg_id, chat_id = _is_valid_reaction_event(update)
+        
+        assert is_valid is True
+        assert msg_id == 12345
+        assert chat_id == "98765"
+
+    def test_no_peer_attribute(self):
+        from telethon.tl.types import UpdateMessageReactions
+        
+        update = MagicMock(spec=UpdateMessageReactions)
+        update.msg_id = 12345
+        update.peer = None
+        
+        is_valid, msg_id, chat_id = _is_valid_reaction_event(update)
+        
+        assert is_valid is True
+        assert msg_id == 12345
+        assert chat_id is None
+
+    def test_peer_has_no_id_attributes(self):
+        from telethon.tl.types import UpdateMessageReactions
+        
+        update = MagicMock(spec=UpdateMessageReactions)
+        update.msg_id = 12345
+        peer = type('EmptyPeer', (), {})()
+        update.peer = peer
+        
+        is_valid, msg_id, chat_id = _is_valid_reaction_event(update)
+        
+        assert is_valid is True
+        assert msg_id == 12345
+        assert chat_id is None
+
 
 @pytest.mark.asyncio
 class TestStartReactionMonitor:
