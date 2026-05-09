@@ -297,14 +297,19 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
         return
 
     nas_syncer = NASSyncer(config.nas_sync)
-
-    logger.info("✅ Reaction download function enabled!")
-    logger.info("🚀 Reaction monitor started, waiting for likes!")
+    me = await client.get_me()
+    my_user_id = me.id
+    logger.info(f"✅ Reaction download function enabled!")
+    logger.info(f"🚀 Reaction monitor started, waiting for likes!")
+    logger.info(f"👤 My user ID: {my_user_id}")
 
     @client.on(events.NewMessage())
     async def on_new_message(event):
         """监听新消息，处理回复关键词触发下载"""
         try:
+            if event.sender_id != my_user_id:
+                return
+            
             if event.is_reply:
                 reply_msg = await event.get_reply_message()
                 if not reply_msg:
