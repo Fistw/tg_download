@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import logging
 from pathlib import Path
 from typing import Optional
 
+from .thumbnail_store import ThumbnailStore
+
 # 全局锁，防止多线程并发问题
-_db_lock = threading.Lock()
+_db_lock = threading.RLock()  # 使用可重入锁，避免死锁
+
+logger = logging.getLogger(__name__)
 
 
 class DownloadDB:
     """统一的 SQLite 下载任务管理。"""
 
-    def __init__(self, db_path: str | Path = "downloads.db") -> None:
+    def __init__(self, db_path: str | Path = "downloads.db", thumbnail_dir: str | Path = "thumbnails") -> None:
         self.db_path = Path(db_path)
         # 确保目录存在
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # 初始化缩略图存储
+        self.thumbnail_store = ThumbnailStore(thumbnail_dir)
         self._initialize_db()
     
     def _get_connection(self) -> sqlite3.Connection:
@@ -54,6 +61,46 @@ class DownloadDB:
                 conn.commit()
             finally:
                 conn.close()
+    
+    def _migrate_blob_thumbnails(self, conn):
+        """将数据库中的 BLOB 缩略图迁移到文件系统。"""
+        try:
+            # 查询有 thumbnail_data 但没有 thumbnail_path 的记录
+            cur = conn.execute("""
+                SELECT id, task_id, file_id, thumbnail_data 
+                FROM dedupe_media 
+                WHERE thumbnail_data IS NOT NULL AND thumbnail_path IS NULL
+            """)
+            
+            migrated_count = 0
+            for row in cur.fetchall():
+                media_id = row['id']
+                task_id = row['task_id']
+                file_id = row['file_id']
+                thumbnail_data = row['thumbnail_data']
+                
+                try:
+                    # 保存到文件系统
+                    relative_path = self.thumbnail_store.save(task_id, file_id, thumbnail_data)
+                    
+                    # 更新数据库记录，设置 path 并清空 data 以节省空间
+                    conn.execute("""
+                        UPDATE dedupe_media 
+                        SET thumbnail_path = ?, thumbnail_data = NULL 
+                        WHERE id = ?
+                    """, (relative_path, media_id))
+                    
+                    migrated_count += 1
+                except Exception as e:
+                    logger.warning(f"迁移缩略图失败 (media_id={media_id}): {e}")
+            
+            if migrated_count > 0:
+                logger.info(f"成功迁移 {migrated_count} 个缩略图到文件系统")
+                conn.commit()
+                
+        except Exception as e:
+            logger.error(f"迁移缩略图时出错: {e}")
+            # 不回滚，允许部分迁移
         
     def _migrate(self, conn):
         """执行数据库迁移，添加新字段"""
@@ -116,11 +163,31 @@ class DownloadDB:
                 first_seen_message_id INTEGER,
                 first_seen_date TIMESTAMP,
                 occurrence_count INTEGER DEFAULT 1,
+                thumbnail_data BLOB,
+                thumbnail_path TEXT,
+                thumbnail_width INTEGER,
+                thumbnail_height INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(task_id, file_id)
             )
             """
         )
+        
+        # 为去重媒体表添加新字段（如果不存在）
+        cursor = conn.execute("PRAGMA table_info(dedupe_media)")
+        dedupe_media_columns = {row[1] for row in cursor.fetchall()}
+        
+        if "thumbnail_data" not in dedupe_media_columns:
+            conn.execute("ALTER TABLE dedupe_media ADD COLUMN thumbnail_data BLOB")
+        if "thumbnail_path" not in dedupe_media_columns:
+            conn.execute("ALTER TABLE dedupe_media ADD COLUMN thumbnail_path TEXT")
+        if "thumbnail_width" not in dedupe_media_columns:
+            conn.execute("ALTER TABLE dedupe_media ADD COLUMN thumbnail_width INTEGER")
+        if "thumbnail_height" not in dedupe_media_columns:
+            conn.execute("ALTER TABLE dedupe_media ADD COLUMN thumbnail_height INTEGER")
+        
+        # 迁移旧的 BLOB 数据到文件系统（如果存在）
+        self._migrate_blob_thumbnails(conn)
         
         # 创建去重结果表
         conn.execute(
@@ -467,6 +534,10 @@ class DownloadDB:
         height: Optional[int] = None,
         first_seen_message_id: Optional[int] = None,
         first_seen_date: Optional[str] = None,
+        thumbnail_data: Optional[bytes] = None,
+        thumbnail_path: Optional[str] = None,
+        thumbnail_width: Optional[int] = None,
+        thumbnail_height: Optional[int] = None,
     ) -> int:
         """添加去重媒体记录，返回 id。如果已存在则更新 occurrence_count。"""
         with _db_lock:
@@ -481,10 +552,18 @@ class DownloadDB:
                     conn.commit()
                     return existing["id"]
                 
+                # 处理缩略图：如果有 data 则保存到文件系统
+                final_thumbnail_path = thumbnail_path
+                if thumbnail_data:
+                    try:
+                        final_thumbnail_path = self.thumbnail_store.save(task_id, file_id, thumbnail_data)
+                    except Exception as e:
+                        logger.warning(f"保存缩略图到文件系统失败: {e}")
+                
                 cur = conn.execute(
-                    "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date),
+                    "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, thumbnail_path, thumbnail_width, thumbnail_height) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, final_thumbnail_path, thumbnail_width, thumbnail_height),
                 )
                 conn.commit()
                 return cur.lastrowid  # type: ignore[return-value]
@@ -505,6 +584,46 @@ class DownloadDB:
             finally:
                 conn.close()
 
+    def get_dedupe_media_thumbnail(self, task_id: int, media_id: Optional[int] = None, file_id: Optional[str] = None) -> Optional[dict]:
+        """获取去重媒体的缩略图数据，从文件系统读取。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                query = "SELECT thumbnail_path, thumbnail_width, thumbnail_height FROM dedupe_media WHERE task_id = ?"
+                params: list = [task_id]
+                
+                if media_id is not None:
+                    query += " AND id = ?"
+                    params.append(media_id)
+                elif file_id is not None:
+                    query += " AND file_id = ?"
+                    params.append(file_id)
+                else:
+                    return None
+                
+                cur = conn.execute(query, params)
+                row = cur.fetchone()
+                if not row:
+                    return None
+                
+                result = dict(row)
+                
+                # 从文件系统读取缩略图数据
+                thumbnail_path = result.get('thumbnail_path')
+                if thumbnail_path:
+                    try:
+                        thumbnail_data = self.thumbnail_store.load(thumbnail_path)
+                        result['thumbnail_data'] = thumbnail_data
+                    except Exception as e:
+                        logger.warning(f"读取缩略图文件失败: {e}")
+                        result['thumbnail_data'] = None
+                else:
+                    result['thumbnail_data'] = None
+                
+                return result
+            finally:
+                conn.close()
+
     def get_dedupe_media_list(
         self,
         task_id: int,
@@ -520,7 +639,19 @@ class DownloadDB:
                 offset = (page - 1) * limit
                 query = """
                     SELECT 
-                        m.*,
+                        m.id,
+                        m.task_id,
+                        m.file_id,
+                        m.file_size,
+                        m.duration,
+                        m.width,
+                        m.height,
+                        m.first_seen_message_id,
+                        m.first_seen_date,
+                        m.occurrence_count,
+                        m.thumbnail_path,
+                        m.thumbnail_width,
+                        m.thumbnail_height,
                         COALESCE(r.is_original, 0) as is_original,
                         COALESCE(r.downloaded, 0) as downloaded
                     FROM dedupe_media m
@@ -548,6 +679,8 @@ class DownloadDB:
                     # 确保布尔值是 Python 布尔类型
                     item['is_original'] = bool(item.get('is_original', False))
                     item['downloaded'] = bool(item.get('downloaded', False))
+                    # 添加一个字段，表示是否有缩略图（检查 thumbnail_path 是否存在）
+                    item['has_thumbnail'] = bool(item.get('thumbnail_path'))
                     media_list.append(item)
                 return media_list
             finally:
@@ -576,11 +709,102 @@ class DownloadDB:
             finally:
                 conn.close()
 
-    def delete_dedupe_task(self, task_id: int) -> None:
-        """删除去重任务及其关联的所有媒体和结果。"""
+    def batch_add_dedupe_media(self, media_list: list) -> None:
+        """批量添加去重媒体记录，提升性能。"""
+        if not media_list:
+            return
+            
+        logger.debug(f"批量添加 {len(media_list)} 条去重媒体记录")
+        
         with _db_lock:
             conn = self._get_connection()
             try:
+                # 使用事务批量执行
+                for media in media_list:
+                    # 检查是否存在
+                    existing = self._get_dedupe_media_with_conn(conn, media['task_id'], media['file_id'])
+                    if existing is not None:
+                        conn.execute(
+                            "UPDATE dedupe_media SET occurrence_count = occurrence_count + 1 WHERE task_id = ? AND file_id = ?",
+                            (media['task_id'], media['file_id']),
+                        )
+                    else:
+                        # 处理缩略图：如果有 data 则保存到文件系统
+                        thumbnail_path = None
+                        if media.get('thumbnail_data'):
+                            try:
+                                thumbnail_path = self.thumbnail_store.save(media['task_id'], media['file_id'], media['thumbnail_data'])
+                            except Exception as e:
+                                logger.warning(f"批量保存缩略图到文件系统失败: {e}")
+                        
+                        conn.execute(
+                            "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, thumbnail_path, thumbnail_width, thumbnail_height) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                media['task_id'],
+                                media['file_id'],
+                                media.get('file_size'),
+                                media.get('duration'),
+                                media.get('width'),
+                                media.get('height'),
+                                media.get('first_seen_message_id'),
+                                media.get('first_seen_date'),
+                                thumbnail_path,
+                                media.get('thumbnail_width'),
+                                media.get('thumbnail_height'),
+                            ),
+                        )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def batch_add_dedupe_results(self, result_list: list) -> None:
+        """批量添加去重结果，提升性能。"""
+        if not result_list:
+            return
+            
+        logger.debug(f"批量添加 {len(result_list)} 条去重结果")
+        
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                for result in result_list:
+                    conn.execute(
+                        "INSERT INTO dedupe_results (task_id, message_id, file_id, is_duplicate, is_original, downloaded) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            result['task_id'],
+                            result['message_id'],
+                            result['file_id'],
+                            int(result.get('is_duplicate', False)),
+                            int(result.get('is_original', False)),
+                            int(result.get('downloaded', False)),
+                        ),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _get_dedupe_media_with_conn(self, conn, task_id: int, file_id: str) -> Optional[dict]:
+        """使用已有的连接获取媒体记录，用于批量操作。"""
+        cur = conn.execute(
+            "SELECT * FROM dedupe_media WHERE task_id = ? AND file_id = ?",
+            (task_id, file_id),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+
+    def delete_dedupe_task(self, task_id: int) -> None:
+        """删除去重任务及其关联的所有媒体和结果，包括缩略图文件。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                # 删除缩略图文件
+                try:
+                    self.thumbnail_store.delete_task_thumbnails(task_id)
+                except Exception as e:
+                    logger.warning(f"删除任务 {task_id} 的缩略图文件失败: {e}")
+                
                 # 删除关联的媒体记录
                 conn.execute("DELETE FROM dedupe_media WHERE task_id = ?", (task_id,))
                 # 删除关联的结果记录
@@ -592,10 +816,16 @@ class DownloadDB:
                 conn.close()
 
     def reset_dedupe_task(self, task_id: int) -> None:
-        """重置去重任务，用于重跑失败任务。"""
+        """重置去重任务，用于重跑失败任务，包括删除缩略图文件。"""
         with _db_lock:
             conn = self._get_connection()
             try:
+                # 删除缩略图文件
+                try:
+                    self.thumbnail_store.delete_task_thumbnails(task_id)
+                except Exception as e:
+                    logger.warning(f"重置任务 {task_id} 时删除缩略图文件失败: {e}")
+                
                 # 删除关联的媒体和结果记录
                 conn.execute("DELETE FROM dedupe_media WHERE task_id = ?", (task_id,))
                 conn.execute("DELETE FROM dedupe_results WHERE task_id = ?", (task_id,))

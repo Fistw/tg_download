@@ -1,31 +1,31 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
-  Typography,
-  Box,
-  Paper,
-  Button,
-  Select,
-  MenuItem,
-  InputLabel,
-  FormControl,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Chip,
-  CircularProgress,
-  Alert,
-  Snackbar,
-  LinearProgress,
-  IconButton,
-  Tooltip,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
+    Typography,
+    Box,
+    Paper,
+    Button,
+    Select,
+    MenuItem,
+    InputLabel,
+    FormControl,
+    Table,
+    TableBody,
+    TableCell,
+    TableContainer,
+    TableHead,
+    TableRow,
+    Chip,
+    CircularProgress,
+    Alert,
+    Snackbar,
+    LinearProgress,
+    IconButton,
+    Tooltip,
+    Dialog,
+    DialogTitle,
+    DialogContent,
+    DialogContentText,
+    DialogActions,
 } from '@mui/material'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import PauseIcon from '@mui/icons-material/Pause'
@@ -105,6 +105,37 @@ export default function Dedupe() {
     message: string
     type: 'success' | 'error'
   } | null>(null)
+  // 悬浮预览相关状态
+  const [hoveredMedia, setHoveredMedia] = useState<DedupeMedia | null>(null)
+  const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 })
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  
+  // 鼠标悬浮显示预览
+  const handleMediaMouseEnter = (media: DedupeMedia, event: React.MouseEvent) => {
+    if (!media.has_thumbnail) return
+    // 清除之前的定时器
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current)
+    }
+    // 设置新的定时器，延迟显示
+    hoverTimerRef.current = setTimeout(() => {
+      setHoveredMedia(media)
+      setHoverPosition({ x: event.clientX, y: event.clientY })
+    }, 300)
+  }
+  
+  const handleMediaMouseLeave = () => {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current)
+    }
+    setHoveredMedia(null)
+  }
+  
+  const handleMediaMouseMove = (event: React.MouseEvent) => {
+    if (hoveredMedia) {
+      setHoverPosition({ x: event.clientX, y: event.clientY })
+    }
+  }
 
   const showNotification = (message: string, type: 'success' | 'error') => {
     setNotification({ message, type })
@@ -529,20 +560,40 @@ export default function Dedupe() {
                   </TableHead>
                   <TableBody>
                     {mediaList.map((media, index) => (
-                      <TableRow key={index} hover>
+                      <TableRow
+                        key={index}
+                        hover
+                        onMouseEnter={(e) => handleMediaMouseEnter(media, e)}
+                        onMouseLeave={handleMediaMouseLeave}
+                        onMouseMove={handleMediaMouseMove}
+                      >
                         <TableCell>
                           <Box
                             sx={{
-                              width: 48,
-                              height: 32,
+                              width: 80,
+                              height: 45,
                               bgcolor: 'grey.100',
-                              borderRadius: 1.5,
+                              borderRadius: 1,
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
+                              overflow: 'hidden',
+                              position: 'relative',
                             }}
                           >
-                            <span style={{ color: 'grey.500', fontSize: 20 }}>🎬</span>
+                            {media.has_thumbnail ? (
+                              <img
+                                src={`/api/dedupe/tasks/${currentTask?.id}/media/${media.id}/thumbnail`}
+                                alt="缩略图"
+                                style={{
+                                  width: '100%',
+                                  height: '100%',
+                                  objectFit: 'cover',
+                                }}
+                              />
+                            ) : (
+                              <span style={{ color: 'grey.500', fontSize: 20 }}>🎬</span>
+                            )}
                           </Box>
                         </TableCell>
                         <TableCell>
@@ -575,6 +626,46 @@ export default function Dedupe() {
                   </TableBody>
                 </Table>
               </TableContainer>
+            )}
+            
+            {/* 悬浮预览框 */}
+            {hoveredMedia && (
+              <Box
+                sx={{
+                  position: 'fixed',
+                  left: hoverPosition.x + 20,
+                  top: hoverPosition.y + 20,
+                  backgroundColor: 'white',
+                  borderRadius: 2,
+                  boxShadow: 10,
+                  zIndex: 9999,
+                  overflow: 'hidden',
+                  maxWidth: '400px',
+                  maxHeight: '400px',
+                }}
+              >
+                {hoveredMedia.has_thumbnail ? (
+                  <img
+                    src={`/api/dedupe/tasks/${currentTask?.id}/media/${hoveredMedia.id}/thumbnail`}
+                    alt="预览"
+                    style={{
+                      maxWidth: '100%',
+                      maxHeight: '400px',
+                      display: 'block',
+                    }}
+                  />
+                ) : (
+                  <Box sx={{ p: 3, textAlign: 'center' }}>
+                    <Typography>暂无预览</Typography>
+                  </Box>
+                )}
+                <Box sx={{ p: 1.5, backgroundColor: 'background.paper' }}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                    大小: {formatFileSize(hoveredMedia.file_size)} | 
+                    时长: {formatDuration(hoveredMedia.duration)}
+                  </Typography>
+                </Box>
+              </Box>
             )}
 
             {pagination && pagination.total_pages > 1 && (

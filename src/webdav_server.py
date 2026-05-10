@@ -36,9 +36,6 @@ _download_db = None
 _cached_chats: list[dict] = []
 # 主事件循环（来自 CLI）
 _main_event_loop = None
-# 全局异步任务管理
-_dedupe_tasks: Dict[int, asyncio.Future] = {}
-
 
 
 def set_monitoring_db(db):
@@ -48,7 +45,7 @@ def set_monitoring_db(db):
 
 
 def set_deduplication_resources(deduplicator, download_db, chats=None, event_loop=None):
-    """设置去重相关资源"""
+    """设置去重相关资源（现在只用于提供数据库和聊天列表）"""
     global _deduplicator
     global _download_db
     global _cached_chats
@@ -56,7 +53,7 @@ def set_deduplication_resources(deduplicator, download_db, chats=None, event_loo
     _deduplicator = deduplicator
     _download_db = download_db
     
-    # 保存主事件循环
+    # 保存主事件循环（不过现在已经不需要用它来启动任务了）
     if event_loop is not None:
         _main_event_loop = event_loop
     
@@ -255,6 +252,19 @@ class MonitoringApp:
                 # POST /api/dedupe/tasks/{task_id}/download
                 if len(parts) == 6 and parts[5] == "download" and method == "POST":
                     return lambda e, s: self.handle_api_dedupe_task_download(e, s, task_id)
+                # GET /api/dedupe/tasks/{task_id}/media/{id_or_file_id}/thumbnail
+                if len(parts) == 7 and parts[5] == "media" and parts[6] == "thumbnail":
+                    # 这种情况没有提供 media_id 或 file_id，不处理
+                    return None
+                if len(parts) == 8 and parts[5] == "media" and parts[7] == "thumbnail" and method == "GET":
+                    media_identifier = parts[6]
+                    # 尝试作为数字处理
+                    try:
+                        media_id = int(media_identifier)
+                        return lambda e, s: self.handle_api_dedupe_media_thumbnail(e, s, task_id, media_id=media_id, file_id=None)
+                    except ValueError:
+                        # 作为 file_id 处理
+                        return lambda e, s: self.handle_api_dedupe_media_thumbnail(e, s, task_id, media_id=None, file_id=media_identifier)
         return None
 
     def handle_dashboard(self, environ, start_response):
@@ -492,32 +502,34 @@ class MonitoringApp:
             return [error]
 
     def handle_api_dedupe_task_start(self, environ, start_response, task_id: int):
-        """POST /api/dedupe/tasks/{task_id}/start - 开始扫描"""
+        """POST /api/dedupe/tasks/{task_id}/start - 将任务标记为待执行"""
         try:
-            if not _deduplicator:
-                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+            if not _download_db:
+                error = json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")
                 start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            if not _main_event_loop:
-                error = json.dumps({"error": "事件循环未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            task = _download_db.get_dedupe_task(task_id)
+            if not task:
+                error = json.dumps({"error": "任务不存在"}, ensure_ascii=False).encode("utf-8")
+                start_response("404 Not Found", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            if task_id in _dedupe_tasks and not _dedupe_tasks[task_id].done():
+            if task["status"] == "scanning":
                 error = json.dumps({"error": "任务已经在运行中"}, ensure_ascii=False).encode("utf-8")
                 start_response("400 Bad Request", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            # 在主事件循环中运行任务
-            future = asyncio.run_coroutine_threadsafe(_deduplicator.scan_chat(task_id), _main_event_loop)
-            _dedupe_tasks[task_id] = future
+            # 更新任务状态为待执行，调度器会自动启动任务
+            _download_db.update_dedupe_task(task_id, status="pending")
             
-            response = json.dumps({"success": True, "message": "扫描任务已启动"}, ensure_ascii=False).encode("utf-8")
+            logger.info(f"任务 {task_id} 已标记为待执行，调度器将在下次检查时启动")
+            
+            response = json.dumps({"success": True, "message": "任务已加入执行队列"}, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
-            logger.error(f"启动扫描失败: {e}")
+            logger.error(f"启动任务失败: {e}")
             error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
             start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
             return [error]
@@ -625,6 +637,31 @@ class MonitoringApp:
             error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
             start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
             return [error]
+    
+    def handle_api_dedupe_media_thumbnail(self, environ, start_response, task_id: int, media_id: int = None, file_id: str = None):
+        """GET /api/dedupe/tasks/{task_id}/media/{media_id}/thumbnail 或 /api/dedupe/tasks/{task_id}/media/{file_id}/thumbnail - 获取媒体缩略图"""
+        try:
+            if not _download_db:
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")]
+            
+            # 获取缩略图
+            thumb_info = _download_db.get_dedupe_media_thumbnail(task_id, media_id=media_id, file_id=file_id)
+            
+            if not thumb_info or not thumb_info.get('thumbnail_data'):
+                start_response("404 Not Found", [("Content-Type", "application/json; charset=utf-8")])
+                return [json.dumps({"error": "缩略图不存在"}, ensure_ascii=False).encode("utf-8")]
+            
+            # 返回缩略图
+            start_response("200 OK", [
+                ("Content-Type", "image/jpeg"),
+                ("Content-Length", str(len(thumb_info['thumbnail_data'])))
+            ])
+            return [thumb_info['thumbnail_data']]
+        except Exception as e:
+            logger.error(f"获取缩略图失败: {e}")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")]
 
     def handle_api_dedupe_task_delete(self, environ, start_response, task_id: int):
         """DELETE /api/dedupe/tasks/{task_id} - 删除去重任务"""
@@ -647,38 +684,22 @@ class MonitoringApp:
             return [error]
 
     def handle_api_dedupe_task_restart(self, environ, start_response, task_id: int):
-        """POST /api/dedupe/tasks/{task_id}/restart - 重置并重跑去重任务"""
+        """POST /api/dedupe/tasks/{task_id}/restart - 重置任务为待执行状态"""
         try:
             if not _download_db:
                 error = json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")
                 start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            if not _deduplicator:
-                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            if not _main_event_loop:
-                error = json.dumps({"error": "事件循环未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            # 如果任务还在运行，先取消
-            if task_id in _dedupe_tasks and not _dedupe_tasks[task_id].done():
-                _dedupe_tasks[task_id].cancel()
-            
             # 重置任务
             _download_db.reset_dedupe_task(task_id)
             
-            # 启动扫描并跟踪任务
-            future = asyncio.run_coroutine_threadsafe(
-                _deduplicator.scan_chat(task_id),
-                _main_event_loop
-            )
-            _dedupe_tasks[task_id] = future
+            # 将任务状态设为待执行
+            _download_db.update_dedupe_task(task_id, status="pending")
             
-            response = json.dumps({"success": True, "message": "任务已重置并开始重新扫描"}, ensure_ascii=False).encode("utf-8")
+            logger.info(f"任务 {task_id} 已重置并标记为待执行，调度器将在下次检查时启动")
+            
+            response = json.dumps({"success": True, "message": "任务已重置并加入执行队列"}, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
@@ -894,9 +915,6 @@ class WebDAVServer:
     def _run_server(self):
         """在独立线程中运行服务器"""
         try:
-            # 启动前清理卡住的任务
-            self._cleanup_stuck_tasks()
-            
             webdav_app_obj = None
             if self.config.enable and WEBDAV_AVAILABLE:
                 wd_config = self._build_webdav_config()

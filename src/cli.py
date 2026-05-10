@@ -163,7 +163,7 @@ async def _cmd_serve(args, config) -> None:
     manager = ClientManager(config)
     await manager.start(start_bot=start_bot)
 
-    history = DownloadDB()
+    history = DownloadDB(thumbnail_dir=config.download.thumbnail_dir)
     download_queue = DownloadQueue(
         manager.user, config.download.output_dir, history, config.download.max_concurrent
     )
@@ -200,6 +200,7 @@ async def _cmd_serve(args, config) -> None:
     
     # 启动 WebDAV 服务器
     webdav_server = None
+    scheduler = None
     try:
         # 初始化 WebDAV 服务器（总是启动，因为现在包含监控看板）
         try:
@@ -208,9 +209,15 @@ async def _cmd_serve(args, config) -> None:
             if monitoring_db:
                 from src.webdav_server import set_monitoring_db
                 set_monitoring_db(monitoring_db)
-            # 设置去重器到 web 服务器，并传递已获取的聊天列表和事件循环
+            # 设置去重器到 web 服务器，并传递已获取的聊天列表
             from src.webdav_server import set_deduplication_resources
             set_deduplication_resources(deduper, history, chats, loop)
+            
+            # 创建并启动任务调度器
+            from src.dedupe_scheduler import DedupeTaskScheduler
+            scheduler = DedupeTaskScheduler(history, deduper, check_interval=2.0)
+            await scheduler.start()
+            
             webdav_server.start()
         except Exception as e:
             logging.error(f"无法启动服务器: {e}")
@@ -235,6 +242,11 @@ async def _cmd_serve(args, config) -> None:
     except KeyboardInterrupt:
         logging.info("\n正在停止...")
     finally:
+        if scheduler:
+            try:
+                await scheduler.stop()
+            except Exception as e:
+                logging.error(f"停止调度器时出错: {e}")
         if webdav_server:
             webdav_server.stop()
         history.close()

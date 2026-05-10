@@ -76,6 +76,7 @@ export interface DedupeTask {
 }
 
 export interface DedupeMedia {
+  id: number;
   file_id: string;
   file_size: number;
   duration: number | null;
@@ -86,6 +87,7 @@ export interface DedupeMedia {
   first_seen_date: string;
   is_original: boolean;
   downloaded: boolean;
+  has_thumbnail: boolean;
 }
 
 export interface DedupeMediaListResponse {
