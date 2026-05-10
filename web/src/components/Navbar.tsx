@@ -4,6 +4,8 @@ import DownloadIcon from '@mui/icons-material/Download'
 import CloudUploadIcon from '@mui/icons-material/CloudUpload'
 import DashboardIcon from '@mui/icons-material/Dashboard'
 import FilterAltIcon from '@mui/icons-material/FilterAlt'
+import LogoutIcon from '@mui/icons-material/Logout'
+import { apiClient } from '../api/client'
 
 export default function Navbar() {
   const location = useLocation()
@@ -16,6 +18,16 @@ export default function Navbar() {
 
   const getLinkPath = (path: string): string => {
     return isInDashboard ? `/dashboard${path}` : path
+  }
+
+  const handleLogout = async () => {
+    try {
+      await apiClient.logout()
+      window.location.reload()
+    } catch (error) {
+      console.error('Logout error:', error)
+      window.location.reload()
+    }
   }
 
   return (
@@ -97,6 +109,15 @@ export default function Navbar() {
               运行中
             </Typography>
           </Box>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<LogoutIcon />}
+            onClick={handleLogout}
+            sx={{ borderRadius: 2 }}
+          >
+            登出
+          </Button>
         </Box>
       </Toolbar>
     </AppBar>

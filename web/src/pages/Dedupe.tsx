@@ -94,12 +94,6 @@ function getTaskStatusLabel(status: string): string {
 }
 
 export default function Dedupe() {
-  const [showLogin, setShowLogin] = useState(!apiClient.isAuthenticated())
-  const [loginUsername, setLoginUsername] = useState('')
-  const [loginPassword, setLoginPassword] = useState('')
-  const [loginError, setLoginError] = useState('')
-  const [isLoggingIn, setIsLoggingIn] = useState(false)
-  
   const [chats, setChats] = useState<ChatInfo[]>([])
   const [tasks, setTasks] = useState<DedupeTask[]>([])
   const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
@@ -121,47 +115,6 @@ export default function Dedupe() {
   const [hoveredMedia, setHoveredMedia] = useState<DedupeMedia | null>(null)
   const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 })
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  // 监听认证事件
-  useEffect(() => {
-    const handleAuthRequired = () => {
-      setShowLogin(true)
-    }
-    window.addEventListener('authRequired', handleAuthRequired)
-    return () => window.removeEventListener('authRequired', handleAuthRequired)
-  }, [])
-
-  // 处理登录
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setIsLoggingIn(true)
-    setLoginError('')
-    
-    try {
-      const result = await apiClient.login(loginUsername, loginPassword)
-      if (result.success) {
-        setShowLogin(false)
-        // 重新加载数据
-        await Promise.all([fetchChats(), fetchTasks()])
-      } else {
-        setLoginError(result.message)
-      }
-    } catch (error) {
-      setLoginError('登录失败，请稍后重试')
-    } finally {
-      setIsLoggingIn(false)
-    }
-  }
-
-  // 处理登出
-  const handleLogout = async () => {
-    try {
-      await apiClient.logout()
-    } catch (error) {
-      console.error('Logout error:', error)
-    }
-    setShowLogin(true)
-  }
   
   // 鼠标悬浮显示预览
   const handleMediaMouseEnter = (media: DedupeMedia, event: React.MouseEvent) => {
@@ -396,60 +349,6 @@ export default function Dedupe() {
     }
   }
 
-  // 登录界面
-  if (showLogin) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '80vh' }}>
-        <Paper elevation={3} sx={{ p: 4, width: '100%', maxWidth: 400, borderRadius: 3 }}>
-          <Box sx={{ textAlign: 'center', mb: 3 }}>
-            <Typography variant="h4" sx={{ fontWeight: 700, mb: 1 }}>
-              Telegram 去重
-            </Typography>
-            <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-              请登录以继续
-            </Typography>
-          </Box>
-
-          <form onSubmit={handleLogin}>
-            <TextField
-              fullWidth
-              label="用户名"
-              variant="outlined"
-              value={loginUsername}
-              onChange={(e) => setLoginUsername(e.target.value)}
-              sx={{ mb: 2 }}
-              autoComplete="username"
-            />
-            <TextField
-              fullWidth
-              label="密码"
-              type="password"
-              variant="outlined"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              sx={{ mb: 2 }}
-              autoComplete="current-password"
-            />
-            {loginError && (
-              <Alert severity="error" sx={{ mb: 2 }}>
-                {loginError}
-              </Alert>
-            )}
-            <Button
-              fullWidth
-              variant="contained"
-              type="submit"
-              disabled={isLoggingIn}
-              sx={{ py: 1.5, borderRadius: 2 }}
-            >
-              {isLoggingIn ? <CircularProgress size={24} /> : '登录'}
-            </Button>
-          </form>
-        </Paper>
-      </Box>
-    )
-  }
-
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
@@ -460,23 +359,12 @@ export default function Dedupe() {
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 700, mb: 1 }}>
-            去重管理
-          </Typography>
-          <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-            扫描群组，识别和下载重复媒体文件
-          </Typography>
-        </Box>
-        <Button
-          variant="outlined"
-          onClick={handleLogout}
-          sx={{ borderRadius: 2 }}
-        >
-          登出
-        </Button>
-      </Box>
+      <Typography variant="h4" sx={{ fontWeight: 700, mb: 1 }}>
+        去重管理
+      </Typography>
+      <Typography variant="body1" sx={{ color: 'text.secondary', mb: 4 }}>
+        扫描群组，识别和下载重复媒体文件
+      </Typography>
 
       <Paper elevation={1} sx={{ borderRadius: 3, p: 3, mb: 3 }}>
         <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
