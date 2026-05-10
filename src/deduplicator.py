@@ -120,13 +120,28 @@ class Deduplicator:
                             import tempfile
                             import os
                             
+                            # 辅助函数：带超时的缩略图下载
+                            async def download_thumb_with_timeout(download_func, timeout_seconds=30):
+                                try:
+                                    # 使用 asyncio.wait_for 设置超时
+                                    return await asyncio.wait_for(download_func(), timeout=timeout_seconds)
+                                except asyncio.TimeoutError:
+                                    logger.warning(f"[任务 {task_id}] 缩略图下载超时（{timeout_seconds}秒）: {file_id}")
+                                    return None
+                                except Exception as e:
+                                    logger.debug(f"[任务 {task_id}] 缩略图下载异常: {e}")
+                                    return None
+                            
                             # 方法1: 使用 thumb=-1 参数 (首选方法)
                             temp_path = None
                             try:
                                 temp_path = tempfile.mktemp(suffix='.jpg')
                                 logger.debug(f"[任务 {task_id}] 尝试下载缩略图 (方法1: thumb=-1)")
-                                # 使用 thumb=-1 来下载最大的缩略图
-                                result_path = await self._client.download_media(message, thumb=-1, file=temp_path)
+                                
+                                async def method1():
+                                    return await self._client.download_media(message, thumb=-1, file=temp_path)
+                                
+                                result_path = await download_thumb_with_timeout(method1, 20)
                                 
                                 if result_path and os.path.exists(result_path) and os.path.getsize(result_path) > 0:
                                     with open(result_path, 'rb') as f:
@@ -138,8 +153,6 @@ class Deduplicator:
                                         logger.info(f"[任务 {task_id}] 成功获取到视频缩略图 (方法1): {file_id}, 大小: {len(thumbnail_data)} 字节, 尺寸: {thumbnail_width}x{thumbnail_height}")
                             except Exception as e:
                                 logger.warning(f"[任务 {task_id}] 缩略图下载方法1失败: {e}")
-                                import traceback
-                                logger.debug(traceback.format_exc())
                             finally:
                                 if temp_path and os.path.exists(temp_path):
                                     try:
@@ -152,8 +165,11 @@ class Deduplicator:
                                 try:
                                     temp_path = tempfile.mktemp(suffix='.jpg')
                                     logger.debug(f"[任务 {task_id}] 尝试下载缩略图 (方法2: thumb=索引)")
-                                    # 使用缩略图索引
-                                    result_path = await self._client.download_media(message, thumb=len(doc.thumbs)-1, file=temp_path)
+                                    
+                                    async def method2():
+                                        return await self._client.download_media(message, thumb=len(doc.thumbs)-1, file=temp_path)
+                                    
+                                    result_path = await download_thumb_with_timeout(method2, 20)
                                     
                                     if result_path and os.path.exists(result_path) and os.path.getsize(result_path) > 0:
                                         with open(result_path, 'rb') as f:
@@ -165,8 +181,6 @@ class Deduplicator:
                                             logger.info(f"[任务 {task_id}] 成功获取到视频缩略图 (方法2): {file_id}, 大小: {len(thumbnail_data)} 字节, 尺寸: {thumbnail_width}x{thumbnail_height}")
                                 except Exception as e:
                                     logger.warning(f"[任务 {task_id}] 缩略图下载方法2失败: {e}")
-                                    import traceback
-                                    logger.debug(traceback.format_exc())
                                 finally:
                                     if temp_path and os.path.exists(temp_path):
                                         try:
@@ -179,22 +193,24 @@ class Deduplicator:
                                 try:
                                     temp_path = tempfile.mktemp(suffix='.jpg')
                                     logger.debug(f"[任务 {task_id}] 尝试下载缩略图 (方法3: 使用 document)")
-                                    # 直接使用 document.media
-                                    if message.media:
-                                        result_path = await self._client.download_media(message.media, thumb=-1, file=temp_path)
+                                    
+                                    async def method3():
+                                        if message.media:
+                                            return await self._client.download_media(message.media, thumb=-1, file=temp_path)
+                                        return None
+                                    
+                                    result_path = await download_thumb_with_timeout(method3, 20)
+                                    
+                                    if result_path and os.path.exists(result_path) and os.path.getsize(result_path) > 0:
+                                        with open(result_path, 'rb') as f:
+                                            thumbnail_data = f.read()
                                         
-                                        if result_path and os.path.exists(result_path) and os.path.getsize(result_path) > 0:
-                                            with open(result_path, 'rb') as f:
-                                                thumbnail_data = f.read()
-                                            
-                                            if thumbnail_data:
-                                                thumbnail_width = getattr(thumb, 'w', None)
-                                                thumbnail_height = getattr(thumb, 'h', None)
-                                                logger.info(f"[任务 {task_id}] 成功获取到视频缩略图 (方法3): {file_id}, 大小: {len(thumbnail_data)} 字节, 尺寸: {thumbnail_width}x{thumbnail_height}")
+                                        if thumbnail_data:
+                                            thumbnail_width = getattr(thumb, 'w', None)
+                                            thumbnail_height = getattr(thumb, 'h', None)
+                                            logger.info(f"[任务 {task_id}] 成功获取到视频缩略图 (方法3): {file_id}, 大小: {len(thumbnail_data)} 字节, 尺寸: {thumbnail_width}x{thumbnail_height}")
                                 except Exception as e:
                                     logger.warning(f"[任务 {task_id}] 缩略图下载方法3失败: {e}")
-                                    import traceback
-                                    logger.debug(traceback.format_exc())
                                 finally:
                                     if temp_path and os.path.exists(temp_path):
                                         try:
@@ -208,8 +224,6 @@ class Deduplicator:
                             logger.info(f"[任务 {task_id}] 视频 {file_id} 没有缩略图")
                     except Exception as e:
                         logger.error(f"[任务 {task_id}] 获取缩略图失败: {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
                         thumbnail_data = None
                         thumbnail_width = None
                         thumbnail_height = None
