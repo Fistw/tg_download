@@ -50,7 +50,7 @@ export default function AuthGuard({ children }: AuthGuardProps) {
               Telegram 下载
             </Typography>
             <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-              请登录以继续
+              请输入配置文件中设置的凭据
             </Typography>
           </Box>
 
