@@ -84,13 +84,15 @@ def get_system_metrics() -> dict:
 
 
 class MonitoringApp:
-    """简单的监控 WSGI 应用，支持 HTTP Basic 认证"""
+    """简单的监控 WSGI 应用，支持基于 Cookie 的会话认证"""
 
     def __init__(self, static_dir: Path, web_dist_dir: Path, username: str, password: str):
         self.static_dir = static_dir
         self.web_dist_dir = web_dist_dir
         self.username = username
         self.password = password
+        self.sessions = {}  # 存储会话
+        self.session_expiry = 7 * 24 * 60 * 60  # 会话有效期：7天
         self.routes = {
             "/": self.handle_dashboard,
             "/dashboard": self.handle_dashboard,
@@ -102,6 +104,8 @@ class MonitoringApp:
             "/api/health/checks": self.handle_api_health_checks,
             "/api/health/recoveries": self.handle_api_recoveries,
             "/health": self.handle_health_endpoint,
+            "/api/login": self.handle_api_login,
+            "/api/logout": self.handle_api_logout,
         }
     
     def _parse_query_params(self, environ: dict) -> dict:
@@ -143,11 +147,43 @@ class MonitoringApp:
         start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
         return [response]
 
-    def check_auth(self, environ):
-        """检查 HTTP Basic 认证"""
+    def _generate_session_id(self):
+        """生成随机会话 ID"""
+        import uuid
+        import time
+        return f"{uuid.uuid4().hex}_{int(time.time())}"
+    
+    def _get_session(self, environ):
+        """从 Cookie 中获取会话"""
         if not self.username or not self.password:
             return True  # 没有配置用户名密码，跳过认证
         
+        cookies = environ.get("HTTP_COOKIE", "")
+        for cookie in cookies.split(";"):
+            cookie = cookie.strip()
+            if cookie.startswith("tg_session="):
+                session_id = cookie.split("=", 1)[1]
+                # 检查会话是否有效
+                session = self.sessions.get(session_id)
+                if session:
+                    import time
+                    if time.time() - session["created_at"] < self.session_expiry:
+                        return True
+                    # 会话过期，删除
+                    del self.sessions[session_id]
+        return False
+    
+    def check_auth(self, environ):
+        """检查认证（保持向后兼容 Basic Auth）"""
+        # 首先尝试会话认证
+        if self._get_session(environ):
+            return True
+        
+        # 如果没有用户名密码配置，直接通过
+        if not self.username or not self.password:
+            return True
+        
+        # 回退到 Basic Auth 保持向后兼容
         auth = environ.get("HTTP_AUTHORIZATION")
         if auth is None:
             return False
@@ -162,6 +198,58 @@ class MonitoringApp:
             return user == self.username and passwd == self.password
         except Exception:
             return False
+    
+    def handle_api_login(self, environ, start_response):
+        """登录接口"""
+        if environ.get("REQUEST_METHOD") != "POST":
+            start_response("405 Method Not Allowed", [("Content-Type", "text/plain")])
+            return [b"Method Not Allowed"]
+        
+        body = self._read_request_body(environ)
+        username = body.get("username", "")
+        password = body.get("password", "")
+        
+        if username == self.username and password == self.password:
+            # 生成会话
+            session_id = self._generate_session_id()
+            import time
+            self.sessions[session_id] = {
+                "created_at": time.time(),
+                "username": username
+            }
+            
+            # 设置 Cookie
+            cookie = f"tg_session={session_id}; Path=/; Max-Age={self.session_expiry}; SameSite=Lax"
+            response = json.dumps({"success": True, "message": "登录成功"}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Set-Cookie", cookie)
+            ])
+            return [response]
+        else:
+            response = json.dumps({"success": False, "message": "用户名或密码错误"}, ensure_ascii=False).encode("utf-8")
+            start_response("401 Unauthorized", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+    
+    def handle_api_logout(self, environ, start_response):
+        """登出接口"""
+        # 清除会话
+        cookies = environ.get("HTTP_COOKIE", "")
+        for cookie in cookies.split(";"):
+            cookie = cookie.strip()
+            if cookie.startswith("tg_session="):
+                session_id = cookie.split("=", 1)[1]
+                if session_id in self.sessions:
+                    del self.sessions[session_id]
+        
+        # 清除 Cookie
+        cookie = "tg_session=; Path=/; Max-Age=0"
+        response = json.dumps({"success": True, "message": "已登出"}, ensure_ascii=False).encode("utf-8")
+        start_response("200 OK", [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Set-Cookie", cookie)
+        ])
+        return [response]
 
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "/")
@@ -170,16 +258,25 @@ class MonitoringApp:
         if path == "/health":
             return self.handle_health_endpoint(environ, start_response)
 
+        # 登录和登出接口跳过认证
+        if path == "/api/login" or path == "/api/logout":
+            handler = self.routes.get(path)
+            if handler:
+                return handler(environ, start_response)
+
         # 静态资源跳过认证（/assets/、/favicon.svg、/icons.svg）
         is_static_resource = path.startswith("/assets/") or path == "/favicon.svg" or path == "/icons.svg"
         
         # 其他路由检查认证
         if not is_static_resource and not self.check_auth(environ):
-            start_response("401 Unauthorized", [
-                ("WWW-Authenticate", 'Basic realm="tg-download monitoring"'),
-                ("Content-Type", "text/plain; charset=utf-8")
-            ])
-            return [b"401 Unauthorized"]
+            # 如果是 API 路由，返回 401
+            if path.startswith("/api/"):
+                start_response("401 Unauthorized", [
+                    ("Content-Type", "application/json; charset=utf-8")
+                ])
+                return [json.dumps({"error": "未登录"}, ensure_ascii=False).encode("utf-8")]
+            # 其他情况返回 index.html，让前端处理登录
+            return self.handle_dashboard(environ, start_response)
 
         # 检查是否是旧版静态文件（保留旧版 /static/ 路由用于旧版页面）
         if path.startswith("/static/dashboard/"):

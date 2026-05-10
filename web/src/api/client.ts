@@ -13,18 +13,43 @@ import type {
 
 const api = axios.create({
   baseURL: '/api',
+  withCredentials: true, // 允许携带 Cookie
 });
 
-// 添加错误拦截器
+// 添加响应拦截器，处理 401
 api.interceptors.response.use(
   (response) => response,
   (error) => {
+    if (error.response?.status === 401) {
+      // 如果是 401，清除本地状态
+      localStorage.removeItem('isAuthenticated');
+      // 触发登录状态变化
+      window.dispatchEvent(new CustomEvent('authRequired'));
+    }
     console.error('API Error:', error);
     return Promise.reject(error);
   }
 );
 
 export const apiClient = {
+  // 认证相关
+  async login(username: string, password: string): Promise<{ success: boolean; message: string }> {
+    const response = await api.post('/login', { username, password });
+    if (response.data.success) {
+      localStorage.setItem('isAuthenticated', 'true');
+    }
+    return response.data;
+  },
+
+  async logout(): Promise<void> {
+    await api.post('/logout');
+    localStorage.removeItem('isAuthenticated');
+  },
+
+  isAuthenticated(): boolean {
+    return localStorage.getItem('isAuthenticated') === 'true';
+  },
+
   // 仪表板相关
   async getDashboardStats(): Promise<DashboardStats> {
     const response = await api.get('/dashboard/stats');
