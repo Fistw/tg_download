@@ -180,6 +180,24 @@ async def _cmd_serve(args, config) -> None:
     # 初始化去重器
     deduper = Deduplicator(manager.user, history)
     
+    # 先获取聊天列表并缓存
+    chats = []
+    try:
+        async for dialog in manager.user.iter_dialogs():
+            if dialog.is_group or dialog.is_channel:
+                chats.append({
+                    "id": dialog.id,
+                    "title": dialog.name,
+                    "type": "channel" if dialog.is_channel else "group"
+                })
+        logging.info(f"已缓存 {len(chats)} 个聊天/频道")
+    except Exception as e:
+        logging.error(f"获取聊天列表失败: {e}")
+    
+    # 获取当前事件循环
+    import asyncio
+    loop = asyncio.get_running_loop()
+    
     # 启动 WebDAV 服务器
     webdav_server = None
     try:
@@ -190,9 +208,9 @@ async def _cmd_serve(args, config) -> None:
             if monitoring_db:
                 from src.webdav_server import set_monitoring_db
                 set_monitoring_db(monitoring_db)
-            # 设置去重器到 web 服务器
+            # 设置去重器到 web 服务器，并传递已获取的聊天列表和事件循环
             from src.webdav_server import set_deduplication_resources
-            set_deduplication_resources(deduper, history)
+            set_deduplication_resources(deduper, history, chats, loop)
             webdav_server.start()
         except Exception as e:
             logging.error(f"无法启动服务器: {e}")

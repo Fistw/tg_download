@@ -96,4 +96,12 @@ export const apiClient = {
     const response = await api.post(`/dedupe/tasks/${taskId}/download`, data);
     return response.data;
   },
+
+  async deleteDedupeTask(taskId: number): Promise<void> {
+    await api.delete(`/dedupe/tasks/${taskId}`);
+  },
+
+  async restartDedupeTask(taskId: number): Promise<void> {
+    await api.post(`/dedupe/tasks/${taskId}/restart`);
+  },
 };

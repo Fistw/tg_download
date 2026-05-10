@@ -32,10 +32,13 @@ _monitoring_db = None
 # 全局去重相关实例
 _deduplicator = None
 _download_db = None
+# 缓存聊天列表
+_cached_chats: list[dict] = []
+# 主事件循环（来自 CLI）
+_main_event_loop = None
 # 全局异步任务管理
-_dedupe_tasks: Dict[int, asyncio.Task] = {}
-_event_loop = None
-_event_loop_thread = None
+_dedupe_tasks: Dict[int, asyncio.Future] = {}
+
 
 
 def set_monitoring_db(db):
@@ -44,29 +47,23 @@ def set_monitoring_db(db):
     _monitoring_db = db
 
 
-def set_deduplication_resources(deduplicator, download_db):
+def set_deduplication_resources(deduplicator, download_db, chats=None, event_loop=None):
     """设置去重相关资源"""
     global _deduplicator
     global _download_db
+    global _cached_chats
+    global _main_event_loop
     _deduplicator = deduplicator
     _download_db = download_db
-
-
-def _start_event_loop():
-    """在单独的线程中运行事件循环"""
-    global _event_loop
-    _event_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_event_loop)
-    _event_loop.run_forever()
-
-
-def _ensure_event_loop():
-    """确保事件循环正在运行"""
-    global _event_loop_thread
-    if _event_loop_thread is None or not _event_loop_thread.is_alive():
-        _event_loop_thread = threading.Thread(target=_start_event_loop, daemon=True)
-        _event_loop_thread.start()
-        time.sleep(0.1)  # 给一点时间让事件循环启动
+    
+    # 保存主事件循环
+    if event_loop is not None:
+        _main_event_loop = event_loop
+    
+    # 使用传入的聊天列表缓存
+    if chats is not None:
+        _cached_chats = chats
+        logger.info(f"已缓存 {len(chats)} 个聊天/频道")
 
 
 def get_system_metrics() -> dict:
@@ -237,6 +234,9 @@ class MonitoringApp:
                 # GET /api/dedupe/tasks/{task_id}
                 if len(parts) == 5 and method == "GET":
                     return lambda e, s: self.handle_api_dedupe_task_detail(e, s, task_id)
+                # DELETE /api/dedupe/tasks/{task_id}
+                if len(parts) == 5 and method == "DELETE":
+                    return lambda e, s: self.handle_api_dedupe_task_delete(e, s, task_id)
                 # POST /api/dedupe/tasks/{task_id}/start
                 if len(parts) == 6 and parts[5] == "start" and method == "POST":
                     return lambda e, s: self.handle_api_dedupe_task_start(e, s, task_id)
@@ -246,6 +246,9 @@ class MonitoringApp:
                 # POST /api/dedupe/tasks/{task_id}/resume
                 if len(parts) == 6 and parts[5] == "resume" and method == "POST":
                     return lambda e, s: self.handle_api_dedupe_task_resume(e, s, task_id)
+                # POST /api/dedupe/tasks/{task_id}/restart
+                if len(parts) == 6 and parts[5] == "restart" and method == "POST":
+                    return lambda e, s: self.handle_api_dedupe_task_restart(e, s, task_id)
                 # GET /api/dedupe/tasks/{task_id}/media
                 if len(parts) == 6 and parts[5] == "media" and method == "GET":
                     return lambda e, s: self.handle_api_dedupe_task_media(e, s, task_id)
@@ -399,12 +402,8 @@ class MonitoringApp:
     def handle_api_dedupe_chats(self, environ, start_response):
         """GET /api/dedupe/chats - 获取可扫描的群组/频道列表"""
         try:
-            chats = []
-            if _deduplicator and hasattr(_deduplicator, '_client'):
-                # 由于 WSGI 是同步的，我们无法直接调用异步方法获取对话
-                # 这里返回一个空列表，实际实现需要与客户端管理器集成
-                chats = []
-            response = json.dumps({"chats": chats}, ensure_ascii=False).encode("utf-8")
+            global _cached_chats
+            response = json.dumps(_cached_chats, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
@@ -419,7 +418,7 @@ class MonitoringApp:
             tasks = []
             if _download_db:
                 tasks = _download_db.list_dedupe_tasks()
-            response = json.dumps({"tasks": tasks}, ensure_ascii=False).encode("utf-8")
+            response = json.dumps(tasks, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
@@ -441,6 +440,22 @@ class MonitoringApp:
                 error = json.dumps({"error": "chat_id 是必需的"}, ensure_ascii=False).encode("utf-8")
                 start_response("400 Bad Request", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
+            
+            # 转换为正确的类型
+            if isinstance(chat_id, str) and chat_id.lstrip('-').isdigit():
+                chat_id = int(chat_id)
+            
+            if start_message_id is not None and start_message_id != "":
+                if isinstance(start_message_id, str) and start_message_id.lstrip('-').isdigit():
+                    start_message_id = int(start_message_id)
+            else:
+                start_message_id = None
+                
+            if total_messages is not None and total_messages != "":
+                if isinstance(total_messages, str) and total_messages.isdigit():
+                    total_messages = int(total_messages)
+            else:
+                total_messages = None
             
             task_id = None
             if _deduplicator:
@@ -467,7 +482,7 @@ class MonitoringApp:
                 start_response("404 Not Found", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            response = json.dumps({"task": task}, ensure_ascii=False).encode("utf-8")
+            response = json.dumps(task, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
@@ -484,23 +499,19 @@ class MonitoringApp:
                 start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            _ensure_event_loop()
-            
-            async def scan_task():
-                try:
-                    await _deduplicator.scan_chat(task_id)
-                except asyncio.CancelledError:
-                    logger.info(f"任务 {task_id} 被取消")
-                except Exception as e:
-                    logger.error(f"任务 {task_id} 执行失败: {e}")
+            if not _main_event_loop:
+                error = json.dumps({"error": "事件循环未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
             
             if task_id in _dedupe_tasks and not _dedupe_tasks[task_id].done():
                 error = json.dumps({"error": "任务已经在运行中"}, ensure_ascii=False).encode("utf-8")
                 start_response("400 Bad Request", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            task = asyncio.run_coroutine_threadsafe(scan_task(), _event_loop)
-            _dedupe_tasks[task_id] = task
+            # 在主事件循环中运行任务
+            future = asyncio.run_coroutine_threadsafe(_deduplicator.scan_chat(task_id), _main_event_loop)
+            _dedupe_tasks[task_id] = future
             
             response = json.dumps({"success": True, "message": "扫描任务已启动"}, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
@@ -557,10 +568,23 @@ class MonitoringApp:
             filter_type = query_params.get("filter_type", ["all"])[0]
             
             media_list = []
+            total = 0
             if _deduplicator:
                 media_list = _deduplicator.get_media_list(task_id, page, limit, search, filter_type)
+                # 暂时假设总数就是当前列表长度，实际应该从数据库获取
+                total = len(media_list)
             
-            response = json.dumps({"media": media_list}, ensure_ascii=False).encode("utf-8")
+            total_pages = (total + limit - 1) // limit if limit > 0 else 0
+            
+            response = json.dumps({
+                "items": media_list,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "total_pages": total_pages
+                }
+            }, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
@@ -582,24 +606,83 @@ class MonitoringApp:
                 start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            _ensure_event_loop()
+            if not _main_event_loop:
+                error = json.dumps({"error": "事件循环未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
             
-            async def download_task():
-                try:
-                    count = await _deduplicator.download_media(
-                        task_id, output_dir, file_id=file_id, download_all=download_all
-                    )
-                    logger.info(f"下载完成，共下载 {count} 个文件")
-                except Exception as e:
-                    logger.error(f"下载任务失败: {e}")
-            
-            asyncio.run_coroutine_threadsafe(download_task(), _event_loop)
+            # 在主事件循环中运行下载任务
+            asyncio.run_coroutine_threadsafe(
+                _deduplicator.download_media(task_id, output_dir, file_id=file_id, download_all=download_all),
+                _main_event_loop
+            )
             
             response = json.dumps({"success": True, "message": "下载任务已启动"}, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
             logger.error(f"启动下载失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_delete(self, environ, start_response, task_id: int):
+        """DELETE /api/dedupe/tasks/{task_id} - 删除去重任务"""
+        try:
+            if not _download_db:
+                error = json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            # 删除任务
+            _download_db.delete_dedupe_task(task_id)
+            
+            response = json.dumps({"success": True, "message": "任务已删除"}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"删除任务失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_restart(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/restart - 重置并重跑去重任务"""
+        try:
+            if not _download_db:
+                error = json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            if not _main_event_loop:
+                error = json.dumps({"error": "事件循环未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            # 如果任务还在运行，先取消
+            if task_id in _dedupe_tasks and not _dedupe_tasks[task_id].done():
+                _dedupe_tasks[task_id].cancel()
+            
+            # 重置任务
+            _download_db.reset_dedupe_task(task_id)
+            
+            # 启动扫描并跟踪任务
+            future = asyncio.run_coroutine_threadsafe(
+                _deduplicator.scan_chat(task_id),
+                _main_event_loop
+            )
+            _dedupe_tasks[task_id] = future
+            
+            response = json.dumps({"success": True, "message": "任务已重置并开始重新扫描"}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"重置任务失败: {e}")
             error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
             start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
             return [error]
@@ -698,6 +781,9 @@ class WebDAVServer:
         if self._stop_event.wait(10):
             return
         
+        # 连续失败计数器
+        consecutive_failures = 0
+        
         while not self._stop_event.is_set():
             try:
                 start_time = time.time()
@@ -708,32 +794,49 @@ class WebDAVServer:
                 
                 if result == 0:
                     response_time = (time.time() - start_time) * 1000
+                    consecutive_failures = 0
                     self._failure_count = 0
                     if _monitoring_db:
                         try:
                             _monitoring_db.record_health_check("success", response_time)
-                            logger.info(f"健康检查成功，已记录")
+                            # 减少日志噪音，只记录调试信息
+                            logger.debug(f"健康检查成功，已记录")
                         except Exception as record_err:
                             logger.error(f"记录健康检查失败: {record_err}")
                     else:
-                        logger.info(f"健康检查成功，_monitoring_db 未设置，不记录")
+                        logger.debug(f"健康检查成功，_monitoring_db 未设置，不记录")
                     logger.debug(f"健康检查成功，响应时间: {response_time:.2f}ms")
                 else:
                     raise Exception(f"Socket connection failed, result={result}")
             except Exception as e:
                 response_time = (time.time() - start_time) * 1000
-                self._failure_count += 1
                 error_msg = str(e)
+                
+                # 对于常见的临时错误（如资源暂时不可用），降低日志级别
+                is_temporary_error = '11' in error_msg or 'EAGAIN' in error_msg or 'EWOULDBLOCK' in error_msg
+                
+                if is_temporary_error:
+                    logger.debug(f"健康检查遇到临时错误: {error_msg}")
+                else:
+                    logger.warning(f"健康检查失败: {error_msg}")
+                
+                consecutive_failures += 1
+                self._failure_count = consecutive_failures
+                
                 if _monitoring_db:
                     try:
-                        _monitoring_db.record_health_check("failed", response_time, error_msg)
+                        # 临时错误标记为 warning 而不是 failed
+                        status = "warning" if is_temporary_error else "failed"
+                        _monitoring_db.record_health_check(status, response_time, error_msg)
                     except Exception as record_err:
                         logger.error(f"记录健康检查失败: {record_err}")
-                logger.warning(f"健康检查失败 ({self._failure_count}/{self.config.health_check_failure_threshold}): {error_msg}")
                 
-                # 检查是否需要触发恢复
-                if self._failure_count >= self.config.health_check_failure_threshold:
-                    self._attempt_recovery()
+                # 只有真正的失败（非临时错误）才计入恢复机制
+                if not is_temporary_error:
+                    logger.warning(f"真实健康检查失败 ({consecutive_failures}/{self.config.health_check_failure_threshold}): {error_msg}")
+                    # 检查是否需要触发恢复
+                    if consecutive_failures >= self.config.health_check_failure_threshold:
+                        self._attempt_recovery()
             
             # 等待下一次检查
             self._stop_event.wait(self.config.health_check_interval)
@@ -757,9 +860,7 @@ class WebDAVServer:
                 action_taken="restart"
             )
         
-        # 记录重启时间
         self._restart_timestamps.append(time.time())
-        self._failure_count = 0
         
         # 停止服务器和主线程
         self.stop()
@@ -768,9 +869,34 @@ class WebDAVServer:
         import sys
         sys.exit(1)
 
+    def _cleanup_stuck_tasks(self):
+        """清理卡住的任务（比如状态是 scanning 但实际上不在运行的）"""
+        global _download_db
+        if not _download_db:
+            return
+        
+        try:
+            tasks = _download_db.list_dedupe_tasks()
+            for task in tasks:
+                if task["status"] == "scanning":
+                    # 检查这个任务是否有正在运行的 future
+                    task_id = task["id"]
+                    if task_id not in _dedupe_tasks or _dedupe_tasks[task_id].done():
+                        # 任务卡住了，重置为 pending 或者设置为 failed
+                        logger.warning(f"任务 {task_id} 卡住了，重置为 pending 状态")
+                        _download_db.update_dedupe_task(task_id, status="pending")
+                        # 清理这个任务的 future
+                        if task_id in _dedupe_tasks:
+                            del _dedupe_tasks[task_id]
+        except Exception as e:
+            logger.error(f"清理卡住任务时出错: {e}")
+
     def _run_server(self):
         """在独立线程中运行服务器"""
         try:
+            # 启动前清理卡住的任务
+            self._cleanup_stuck_tasks()
+            
             webdav_app_obj = None
             if self.config.enable and WEBDAV_AVAILABLE:
                 wd_config = self._build_webdav_config()

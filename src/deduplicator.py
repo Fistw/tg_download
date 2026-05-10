@@ -48,13 +48,19 @@ class Deduplicator:
 
         chat_id = task["chat_id"]
         last_scanned_id = task["last_scanned_message_id"]
-        processed = task["processed_messages"] or 0
+        processed = task.get("processed_messages", 0) or 0
 
         logger.info("开始扫描聊天 %d，从消息 ID %s 开始", chat_id, last_scanned_id or "开始")
         self._db.update_dedupe_task(task_id, status="scanning")
 
         try:
-            async for message in self._client.iter_messages(chat_id, offset_id=last_scanned_id, reverse=False):
+            # 构建迭代参数，避免传入 None
+            iter_kwargs = {}
+            if last_scanned_id is not None and last_scanned_id > 0:
+                iter_kwargs["offset_id"] = last_scanned_id
+            iter_kwargs["reverse"] = False
+            
+            async for message in self._client.iter_messages(chat_id, **iter_kwargs):
                 await self._pause_event.wait()
 
                 if message is None:

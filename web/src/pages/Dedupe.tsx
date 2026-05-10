@@ -19,10 +19,19 @@ import {
   Alert,
   Snackbar,
   LinearProgress,
+  IconButton,
+  Tooltip,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
 } from '@mui/material'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import PauseIcon from '@mui/icons-material/Pause'
 import DownloadIcon from '@mui/icons-material/Download'
+import RefreshIcon from '@mui/icons-material/Refresh'
+import DeleteIcon from '@mui/icons-material/Delete'
 import { apiClient } from '../api/client'
 import type { ChatInfo, DedupeTask, DedupeMedia } from '../types'
 
@@ -230,6 +239,53 @@ export default function Dedupe() {
     }
   }
 
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [taskToDelete, setTaskToDelete] = useState<number | null>(null)
+
+  const handleDeleteTask = async (taskId: number) => {
+    setTaskToDelete(taskId)
+    setDeleteDialogOpen(true)
+  }
+
+  const confirmDeleteTask = async () => {
+    if (!taskToDelete) return
+    try {
+      await apiClient.deleteDedupeTask(taskToDelete)
+      showNotification('任务已删除', 'success')
+      
+      // 如果删除的是当前任务，取消选中状态
+      if (currentTask && currentTask.id === taskToDelete) {
+        setCurrentTask(null)
+        setMediaList([])
+        setPagination(null)
+      }
+      
+      // 刷新任务列表
+      await fetchTasks()
+    } catch (err) {
+      showNotification('删除任务失败', 'error')
+    } finally {
+      setDeleteDialogOpen(false)
+      setTaskToDelete(null)
+    }
+  }
+
+  const handleRestartTask = async (taskId: number) => {
+    try {
+      await apiClient.restartDedupeTask(taskId)
+      showNotification('任务已重置并重新开始', 'success')
+      
+      // 如果是当前任务，刷新任务列表和媒体列表
+      if (currentTask && currentTask.id === taskId) {
+        await Promise.all([fetchTasks(), fetchMedia(taskId, 1)])
+      } else {
+        await fetchTasks()
+      }
+    } catch (err) {
+      showNotification('重置任务失败', 'error')
+    }
+  }
+
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
@@ -295,7 +351,7 @@ export default function Dedupe() {
                   size="small"
                 />
               </Box>
-              <Box sx={{ display: 'flex', gap: 1 }}>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                 {currentTask.status === 'pending' && (
                   <Button
                     variant="contained"
@@ -326,6 +382,38 @@ export default function Dedupe() {
                     继续
                   </Button>
                 )}
+                {/* 失败任务可以重置 */}
+                {currentTask.status === 'failed' && (
+                  <Button
+                    variant="contained"
+                    startIcon={<RefreshIcon />}
+                    onClick={() => handleRestartTask(currentTask.id)}
+                    sx={{ borderRadius: 2 }}
+                    color="warning"
+                  >
+                    重新开始
+                  </Button>
+                )}
+                {/* 任何状态都可以重置（非扫描中） */}
+                {(currentTask.status === 'completed' || currentTask.status === 'failed' || currentTask.status === 'pending') && (
+                  <Tooltip title="重置任务">
+                    <IconButton
+                      onClick={() => handleRestartTask(currentTask.id)}
+                      color="primary"
+                    >
+                      <RefreshIcon />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {/* 任何状态都可以删除 */}
+                <Tooltip title="删除任务">
+                  <IconButton
+                    onClick={() => handleDeleteTask(currentTask.id)}
+                    color="error"
+                  >
+                    <DeleteIcon />
+                  </IconButton>
+                </Tooltip>
               </Box>
             </Box>
 
@@ -514,7 +602,7 @@ export default function Dedupe() {
             )}
           </Paper>
 
-          {tasks.length > 1 && (
+          {tasks.length > 0 && (
             <Paper elevation={1} sx={{ borderRadius: 3, p: 3, mt: 3 }}>
               <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
                 历史任务
@@ -523,32 +611,63 @@ export default function Dedupe() {
                 {tasks.map((task) => (
                   <Box
                     key={task.id}
-                    onClick={() => setCurrentTask(task)}
                     sx={{
                       p: 2,
                       borderRadius: 2,
                       border: 1,
-                      borderColor: task.id === currentTask.id ? 'primary.main' : 'divider',
-                      bgcolor: task.id === currentTask.id ? 'primary.50' : 'grey.50',
-                      cursor: 'pointer',
-                      '&:hover': {
-                        bgcolor: 'grey.100',
-                      },
+                      borderColor: task.id === currentTask?.id ? 'primary.main' : 'divider',
+                      bgcolor: task.id === currentTask?.id ? 'primary.50' : 'grey.50',
                     }}
                   >
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                        {task.chat_title}
-                      </Typography>
-                      <Chip
-                        label={getTaskStatusLabel(task.status)}
-                        color={getTaskStatusColor(task.status)}
-                        size="small"
-                      />
+                      <Box 
+                        sx={{ 
+                          flex: 1, cursor: 'pointer' }}
+                        onClick={() => setCurrentTask(task)}
+                      >
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {task.chat_title}
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.5 }}>
+                          进度: {task.progress}% | 独特: {task.unique_media} | 重复: {task.duplicate_count}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 1 }}>
+                        <Chip
+                          label={getTaskStatusLabel(task.status)}
+                          color={getTaskStatusColor(task.status)}
+                          size="small"
+                        />
+                        {/* 重置按钮 - 非扫描中时显示 */}
+                        {task.status !== 'scanning' && (
+                          <Tooltip title="重置任务">
+                            <IconButton
+                              size="small"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRestartTask(task.id);
+                              }}
+                              color="primary"
+                            >
+                              <RefreshIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        )}
+                        {/* 删除按钮 */}
+                        <Tooltip title="删除任务">
+                          <IconButton
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteTask(task.id);
+                            }}
+                            color="error"
+                          >
+                            <DeleteIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Box>
                     </Box>
-                    <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 1 }}>
-                      进度: {task.progress}% | 独特: {task.unique_media} | 重复: {task.duplicate_count}
-                    </Typography>
                   </Box>
                 ))}
               </Box>
@@ -570,6 +689,29 @@ export default function Dedupe() {
           {notification?.message}
         </Alert>
       </Snackbar>
+
+      {/* 删除任务确认对话框 */}
+      <Dialog
+        open={deleteDialogOpen}
+        onClose={() => setDeleteDialogOpen(false)}
+        aria-labelledby="delete-dialog-title"
+        aria-describedby="delete-dialog-description"
+      >
+        <DialogTitle id="delete-dialog-title">确认删除任务</DialogTitle>
+        <DialogContent>
+          <DialogContentText id="delete-dialog-description">
+            您确定要删除此任务吗？此操作将同时删除所有相关的媒体和结果记录，且不可恢复。
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDialogOpen(false)} disabled={false}>
+            取消
+          </Button>
+          <Button onClick={confirmDeleteTask} color="error" variant="contained" autoFocus>
+            确认删除
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }
