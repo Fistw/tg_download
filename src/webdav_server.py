@@ -783,8 +783,15 @@ class WebDAVServer:
             "port": 0,
             "provider_mapping": {self.config.mount_path: FilesystemProvider(str(mount_dir))},
             "verbose": 0,
+            "http_authenticator": None,
+            "simple_dc": {
+                "user_mapping": {
+                    self.config.mount_path: {},
+                },
+            },
         })
 
+        # 如果配置了用户名和密码，就启用认证
         if self.config.username and self.config.password:
             config["http_authenticator"] = {
                 "accept_basic": True,
@@ -798,9 +805,6 @@ class WebDAVServer:
                     },
                 },
             }
-        else:
-            config["http_authenticator"] = None
-            config["simple_dc"] = None
 
         return config
 
