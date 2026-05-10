@@ -396,6 +396,214 @@ class MonitoringApp:
         ])
         return [response]
 
+    def handle_api_dedupe_chats(self, environ, start_response):
+        """GET /api/dedupe/chats - 获取可扫描的群组/频道列表"""
+        try:
+            chats = []
+            if _deduplicator and hasattr(_deduplicator, '_client'):
+                # 由于 WSGI 是同步的，我们无法直接调用异步方法获取对话
+                # 这里返回一个空列表，实际实现需要与客户端管理器集成
+                chats = []
+            response = json.dumps({"chats": chats}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"获取聊天列表失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_tasks_list(self, environ, start_response):
+        """GET /api/dedupe/tasks - 获取去重任务列表"""
+        try:
+            tasks = []
+            if _download_db:
+                tasks = _download_db.list_dedupe_tasks()
+            response = json.dumps({"tasks": tasks}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"获取去重任务列表失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_tasks_create(self, environ, start_response):
+        """POST /api/dedupe/tasks - 创建新的去重任务"""
+        try:
+            body = self._read_request_body(environ)
+            chat_id = body.get("chat_id")
+            chat_title = body.get("chat_title")
+            start_message_id = body.get("start_message_id")
+            total_messages = body.get("total_messages")
+            
+            if not chat_id:
+                error = json.dumps({"error": "chat_id 是必需的"}, ensure_ascii=False).encode("utf-8")
+                start_response("400 Bad Request", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            task_id = None
+            if _deduplicator:
+                task_id = _deduplicator.create_task(chat_id, chat_title, start_message_id, total_messages)
+            
+            response = json.dumps({"task_id": task_id, "success": True}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"创建去重任务失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_detail(self, environ, start_response, task_id: int):
+        """GET /api/dedupe/tasks/{task_id} - 获取单个任务详情"""
+        try:
+            task = None
+            if _download_db:
+                task = _download_db.get_dedupe_task(task_id)
+            
+            if not task:
+                error = json.dumps({"error": "任务不存在"}, ensure_ascii=False).encode("utf-8")
+                start_response("404 Not Found", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            response = json.dumps({"task": task}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"获取任务详情失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_start(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/start - 开始扫描"""
+        try:
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            _ensure_event_loop()
+            
+            async def scan_task():
+                try:
+                    await _deduplicator.scan_chat(task_id)
+                except asyncio.CancelledError:
+                    logger.info(f"任务 {task_id} 被取消")
+                except Exception as e:
+                    logger.error(f"任务 {task_id} 执行失败: {e}")
+            
+            if task_id in _dedupe_tasks and not _dedupe_tasks[task_id].done():
+                error = json.dumps({"error": "任务已经在运行中"}, ensure_ascii=False).encode("utf-8")
+                start_response("400 Bad Request", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            task = asyncio.run_coroutine_threadsafe(scan_task(), _event_loop)
+            _dedupe_tasks[task_id] = task
+            
+            response = json.dumps({"success": True, "message": "扫描任务已启动"}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"启动扫描失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_pause(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/pause - 暂停扫描"""
+        try:
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            _deduplicator.pause_scan()
+            response = json.dumps({"success": True, "message": "扫描已暂停"}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"暂停扫描失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_resume(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/resume - 恢复扫描"""
+        try:
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            _deduplicator.resume_scan()
+            response = json.dumps({"success": True, "message": "扫描已恢复"}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"恢复扫描失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_media(self, environ, start_response, task_id: int):
+        """GET /api/dedupe/tasks/{task_id}/media - 获取媒体列表"""
+        try:
+            query_params = self._parse_query_params(environ)
+            page = int(query_params.get("page", [1])[0])
+            limit = int(query_params.get("limit", [20])[0])
+            search = query_params.get("search", [None])[0]
+            filter_type = query_params.get("filter_type", ["all"])[0]
+            
+            media_list = []
+            if _deduplicator:
+                media_list = _deduplicator.get_media_list(task_id, page, limit, search, filter_type)
+            
+            response = json.dumps({"media": media_list}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"获取媒体列表失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_download(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/download - 下载独特媒体"""
+        try:
+            body = self._read_request_body(environ)
+            output_dir = body.get("output_dir", "downloads")
+            file_id = body.get("file_id")
+            download_all = body.get("download_all", True)
+            
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            _ensure_event_loop()
+            
+            async def download_task():
+                try:
+                    count = await _deduplicator.download_media(
+                        task_id, output_dir, file_id=file_id, download_all=download_all
+                    )
+                    logger.info(f"下载完成，共下载 {count} 个文件")
+                except Exception as e:
+                    logger.error(f"下载任务失败: {e}")
+            
+            asyncio.run_coroutine_threadsafe(download_task(), _event_loop)
+            
+            response = json.dumps({"success": True, "message": "下载任务已启动"}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"启动下载失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
 
 class CombinedApp:
     """组合 WSGI 应用（支持 WebDAV 和监控），监控需要认证，WebDAV 使用自己的认证"""
@@ -642,211 +850,3 @@ class WebDAVServer:
         self._server_thread.join(timeout=5)
         if self._server_thread.is_alive():
             logger.warning("服务器未能在 5 秒内停止")
-
-    def handle_api_dedupe_chats(self, environ, start_response):
-        """GET /api/dedupe/chats - 获取可扫描的群组/频道列表"""
-        try:
-            chats = []
-            if _deduplicator and hasattr(_deduplicator, '_client'):
-                # 由于 WSGI 是同步的，我们无法直接调用异步方法获取对话
-                # 这里返回一个空列表，实际实现需要与客户端管理器集成
-                chats = []
-            response = json.dumps({"chats": chats}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"获取聊天列表失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_tasks_list(self, environ, start_response):
-        """GET /api/dedupe/tasks - 获取去重任务列表"""
-        try:
-            tasks = []
-            if _download_db:
-                tasks = _download_db.list_dedupe_tasks()
-            response = json.dumps({"tasks": tasks}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"获取去重任务列表失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_tasks_create(self, environ, start_response):
-        """POST /api/dedupe/tasks - 创建新的去重任务"""
-        try:
-            body = self._read_request_body(environ)
-            chat_id = body.get("chat_id")
-            chat_title = body.get("chat_title")
-            start_message_id = body.get("start_message_id")
-            total_messages = body.get("total_messages")
-            
-            if not chat_id:
-                error = json.dumps({"error": "chat_id 是必需的"}, ensure_ascii=False).encode("utf-8")
-                start_response("400 Bad Request", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            task_id = None
-            if _deduplicator:
-                task_id = _deduplicator.create_task(chat_id, chat_title, start_message_id, total_messages)
-            
-            response = json.dumps({"task_id": task_id, "success": True}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"创建去重任务失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_task_detail(self, environ, start_response, task_id: int):
-        """GET /api/dedupe/tasks/{task_id} - 获取单个任务详情"""
-        try:
-            task = None
-            if _download_db:
-                task = _download_db.get_dedupe_task(task_id)
-            
-            if not task:
-                error = json.dumps({"error": "任务不存在"}, ensure_ascii=False).encode("utf-8")
-                start_response("404 Not Found", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            response = json.dumps({"task": task}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"获取任务详情失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_task_start(self, environ, start_response, task_id: int):
-        """POST /api/dedupe/tasks/{task_id}/start - 开始扫描"""
-        try:
-            if not _deduplicator:
-                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            _ensure_event_loop()
-            
-            async def scan_task():
-                try:
-                    await _deduplicator.scan_chat(task_id)
-                except asyncio.CancelledError:
-                    logger.info(f"任务 {task_id} 被取消")
-                except Exception as e:
-                    logger.error(f"任务 {task_id} 执行失败: {e}")
-            
-            if task_id in _dedupe_tasks and not _dedupe_tasks[task_id].done():
-                error = json.dumps({"error": "任务已经在运行中"}, ensure_ascii=False).encode("utf-8")
-                start_response("400 Bad Request", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            task = asyncio.run_coroutine_threadsafe(scan_task(), _event_loop)
-            _dedupe_tasks[task_id] = task
-            
-            response = json.dumps({"success": True, "message": "扫描任务已启动"}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"启动扫描失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_task_pause(self, environ, start_response, task_id: int):
-        """POST /api/dedupe/tasks/{task_id}/pause - 暂停扫描"""
-        try:
-            if not _deduplicator:
-                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            _deduplicator.pause_scan()
-            response = json.dumps({"success": True, "message": "扫描已暂停"}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"暂停扫描失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_task_resume(self, environ, start_response, task_id: int):
-        """POST /api/dedupe/tasks/{task_id}/resume - 恢复扫描"""
-        try:
-            if not _deduplicator:
-                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            _deduplicator.resume_scan()
-            response = json.dumps({"success": True, "message": "扫描已恢复"}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"恢复扫描失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_task_media(self, environ, start_response, task_id: int):
-        """GET /api/dedupe/tasks/{task_id}/media - 获取媒体列表"""
-        try:
-            query_params = self._parse_query_params(environ)
-            page = int(query_params.get("page", [1])[0])
-            limit = int(query_params.get("limit", [20])[0])
-            search = query_params.get("search", [None])[0]
-            filter_type = query_params.get("filter_type", ["all"])[0]
-            
-            media_list = []
-            if _deduplicator:
-                media_list = _deduplicator.get_media_list(task_id, page, limit, search, filter_type)
-            
-            response = json.dumps({"media": media_list}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"获取媒体列表失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_task_download(self, environ, start_response, task_id: int):
-        """POST /api/dedupe/tasks/{task_id}/download - 下载独特媒体"""
-        try:
-            body = self._read_request_body(environ)
-            output_dir = body.get("output_dir", "downloads")
-            file_id = body.get("file_id")
-            download_all = body.get("download_all", True)
-            
-            if not _deduplicator:
-                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            _ensure_event_loop()
-            
-            async def download_task():
-                try:
-                    count = await _deduplicator.download_media(
-                        task_id, output_dir, file_id=file_id, download_all=download_all
-                    )
-                    logger.info(f"下载完成，共下载 {count} 个文件")
-                except Exception as e:
-                    logger.error(f"下载任务失败: {e}")
-            
-            asyncio.run_coroutine_threadsafe(download_task(), _event_loop)
-            
-            response = json.dumps({"success": True, "message": "下载任务已启动"}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"启动下载失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
