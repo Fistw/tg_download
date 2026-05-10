@@ -920,7 +920,7 @@ class WebDAVServer:
                 wd_config = self._build_webdav_config()
                 webdav_app_obj = WsgiDAVApp(wd_config)
             
-            monitoring_app = MonitoringApp(self._static_dir, self._web_dist_dir, self.config.username, self.config.password)
+            monitoring_app = MonitoringApp(self._static_dir, self._web_dist_dir, self.config.monitoring_username, self.config.monitoring_password)
             combined_app = CombinedApp(
                 webdav_app_obj,
                 monitoring_app,
