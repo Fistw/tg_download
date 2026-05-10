@@ -59,10 +59,10 @@ class WebDAVServerConfig:
     monitoring_username: str = ""
     monitoring_password: str = ""
     health_check_enabled: bool = True
-    health_check_interval: int = 30
-    health_check_failure_threshold: int = 3
-    health_check_timeout: int = 5
-    health_check_max_restarts_per_hour: int = 5
+    health_check_interval: int = 60  # 增加检查间隔到 60 秒
+    health_check_failure_threshold: int = 10  # 提高失败阈值到 10 次
+    health_check_timeout: int = 10  # 增加超时到 10 秒
+    health_check_max_restarts_per_hour: int = 3
     server_backlog: int = 128
 
 
@@ -202,10 +202,10 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         monitoring_username=os.environ.get("MONITORING_USERNAME", webdav_raw.get("monitoring_username", "")),
         monitoring_password=os.environ.get("MONITORING_PASSWORD", webdav_raw.get("monitoring_password", "")),
         health_check_enabled=bool(webdav_raw.get("health_check_enabled", True)),
-        health_check_interval=int(webdav_raw.get("health_check_interval", 30)),
-        health_check_failure_threshold=int(webdav_raw.get("health_check_failure_threshold", 3)),
-        health_check_timeout=int(webdav_raw.get("health_check_timeout", 5)),
-        health_check_max_restarts_per_hour=int(webdav_raw.get("health_check_max_restarts_per_hour", 5)),
+        health_check_interval=int(webdav_raw.get("health_check_interval", 60)),
+        health_check_failure_threshold=int(webdav_raw.get("health_check_failure_threshold", 10)),
+        health_check_timeout=int(webdav_raw.get("health_check_timeout", 10)),
+        health_check_max_restarts_per_hour=int(webdav_raw.get("health_check_max_restarts_per_hour", 3)),
         server_backlog=int(webdav_raw.get("server_backlog", 128)),
     )
 
