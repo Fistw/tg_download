@@ -4,6 +4,7 @@
 
 - 一台 Linux/macOS 服务器（推荐 Ubuntu 22.04+）
 - Python 3.9+
+- **Node.js 18+** （用于 React 前端构建）
 - 一个 Telegram 账号
 - 从 [my.telegram.org](https://my.telegram.org) 获取的 `api_id` 和 `api_hash`
 - 从 [@BotFather](https://t.me/BotFather) 创建的 Bot Token（如需 Bot 交互功能）
@@ -18,17 +19,30 @@ cd tg_download
 ./scripts/deploy.sh
 ```
 
-脚本会引导你完成 Python 安装、配置填写、Telegram 登录和服务启动。
+脚本会引导你完成 Python 安装、配置填写、Telegram 登录、前端构建和服务启动。
 
 ---
 
 ## 手动部署
 
-### 第一步：安装 Python 并安装依赖
+### 第一步：安装 Python、Node.js 并安装依赖
 
 ```bash
 python3 --version  # 确保 3.9+
 pip install -e .
+
+# 安装 Node.js（如果尚未安装）
+# Ubuntu/Debian:
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+# macOS:
+brew install node
+
+# 构建 React 前端
+cd web
+npm install
+npm run build
+cd ..
 ```
 
 ### 第二步：创建配置文件
@@ -131,6 +145,15 @@ journalctl -u tg-download -f
 
 ## 使用方式
 
+### Dashboard 监控面板
+
+访问 `http://your-server:8080/dashboard` 查看：
+- 下载/上传统计
+- 系统指标
+- 去重功能（扫描群组、查看重复视频、下载唯一视频）
+
+旧版页面仍然可以通过 `/dashboard-legacy` 访问。
+
 ### CLI 手动下载
 
 ```bash
@@ -166,6 +189,7 @@ scp config.yaml user_session.session user@new_server:/path/to/tg_download/
 
 - `config.yaml` — 你的配置
 - `user_session.session` — 登录会话（有了它不需要重新登录）
+- `web/dist/` — 构建好的前端文件（可选，可在新机器重新构建）
 - `downloads/` — 已下载的文件（可选）
 - `downloads.db` — 下载历史记录（可选）
 
@@ -180,6 +204,7 @@ scp config.yaml user_session.session user@new_server:/path/to/tg_download/
 | `AuthKeyUnregisteredError` | session 文件失效，删除 `*.session` 后重新登录 |
 | Bot 不响应 | 检查 `bot_token` 是否正确，`allowed_users` 是否包含你的 ID |
 | 无法下载私有频道 | 确保你的 Telegram 账号已加入该频道 |
+| Dashboard 404 | 确保已构建 React 前端：`cd web && npm install && npm run build` |
 
 ---
 

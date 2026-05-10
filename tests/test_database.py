@@ -272,3 +272,188 @@ class TestPendingTasks:
 class TestDownloadHistoryAlias:
     def test_alias_is_download_db(self):
         assert DownloadHistory is DownloadDB
+
+
+class TestDedupeTask:
+    def test_create_dedupe_task(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345, chat_title="Test Chat", start_message_id=100, total_messages=500)
+            assert isinstance(task_id, int)
+            assert task_id >= 1
+            
+            task = db.get_dedupe_task(task_id)
+            assert task is not None
+            assert task["chat_id"] == 12345
+            assert task["chat_title"] == "Test Chat"
+            assert task["start_message_id"] == 100
+            assert task["total_messages"] == 500
+            assert task["status"] == "pending"
+        finally:
+            db.close()
+    
+    def test_update_dedupe_task(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            db.update_dedupe_task(task_id, status="scanning", last_scanned_message_id=50, processed_messages=100)
+            
+            task = db.get_dedupe_task(task_id)
+            assert task["status"] == "scanning"
+            assert task["last_scanned_message_id"] == 50
+            assert task["processed_messages"] == 100
+        finally:
+            db.close()
+    
+    def test_get_dedupe_task_not_found(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            assert db.get_dedupe_task(999) is None
+        finally:
+            db.close()
+    
+    def test_list_dedupe_tasks(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            db.create_dedupe_task(chat_id=12345, chat_title="Chat 1")
+            db.create_dedupe_task(chat_id=67890, chat_title="Chat 2")
+            
+            tasks = db.list_dedupe_tasks()
+            assert len(tasks) == 2
+            assert {t["chat_title"] for t in tasks} == {"Chat 1", "Chat 2"}
+        finally:
+            db.close()
+    
+    def test_list_dedupe_tasks_limit(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            for i in range(5):
+                db.create_dedupe_task(chat_id=1000 + i, chat_title=f"Chat {i}")
+            
+            tasks = db.list_dedupe_tasks(limit=3)
+            assert len(tasks) == 3
+        finally:
+            db.close()
+
+
+class TestDedupeMedia:
+    def test_add_dedupe_media(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            media_id = db.add_dedupe_media(
+                task_id,
+                file_id="file_123",
+                file_size=1024000,
+                duration=120,
+                width=1920,
+                height=1080,
+                first_seen_message_id=50,
+                first_seen_date="2024-01-01T00:00:00"
+            )
+            assert isinstance(media_id, int)
+            assert media_id >= 1
+            
+            media = db.get_dedupe_media(task_id, "file_123")
+            assert media is not None
+            assert media["file_id"] == "file_123"
+            assert media["file_size"] == 1024000
+            assert media["occurrence_count"] == 1
+        finally:
+            db.close()
+    
+    def test_add_dedupe_media_existing_increments_count(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            media_id1 = db.add_dedupe_media(task_id, file_id="file_123")
+            media_id2 = db.add_dedupe_media(task_id, file_id="file_123")
+            
+            assert media_id1 == media_id2
+            
+            media = db.get_dedupe_media(task_id, "file_123")
+            assert media["occurrence_count"] == 2
+        finally:
+            db.close()
+    
+    def test_get_dedupe_media_not_found(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            assert db.get_dedupe_media(task_id, "nonexistent") is None
+        finally:
+            db.close()
+    
+    def test_get_dedupe_media_list_pagination(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            for i in range(30):
+                db.add_dedupe_media(task_id, file_id=f"file_{i}")
+            
+            # 第一页
+            page1 = db.get_dedupe_media_list(task_id, page=1, limit=10)
+            assert len(page1) == 10
+            
+            # 第二页
+            page2 = db.get_dedupe_media_list(task_id, page=2, limit=10)
+            assert len(page2) == 10
+        finally:
+            db.close()
+    
+    def test_get_dedupe_media_list_search(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            db.add_dedupe_media(task_id, file_id="test_file_123")
+            db.add_dedupe_media(task_id, file_id="test_file_456")
+            db.add_dedupe_media(task_id, file_id="other_file_789")
+            
+            results = db.get_dedupe_media_list(task_id, search="test")
+            assert len(results) == 2
+            assert all("test" in m["file_id"] for m in results)
+        finally:
+            db.close()
+    
+    def test_get_dedupe_media_list_filter_duplicates(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            db.add_dedupe_media(task_id, file_id="file_single")
+            db.add_dedupe_media(task_id, file_id="file_dup")
+            db.add_dedupe_media(task_id, file_id="file_dup")
+            
+            # 筛选重复项
+            duplicates = db.get_dedupe_media_list(task_id, filter_type="duplicates")
+            assert len(duplicates) == 1
+            assert duplicates[0]["file_id"] == "file_dup"
+            
+            # 筛选单项
+            singles = db.get_dedupe_media_list(task_id, filter_type="singles")
+            assert len(singles) == 1
+            assert singles[0]["file_id"] == "file_single"
+            
+            # 筛选全部
+            all_media = db.get_dedupe_media_list(task_id, filter_type="all")
+            assert len(all_media) == 2
+        finally:
+            db.close()
+
+
+class TestDedupeResult:
+    def test_add_dedupe_result(self, tmp_path):
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            result_id = db.add_dedupe_result(
+                task_id,
+                message_id=100,
+                file_id="file_123",
+                is_duplicate=False,
+                is_original=True,
+                downloaded=False
+            )
+            assert isinstance(result_id, int)
+            assert result_id >= 1
+        finally:
+            db.close()

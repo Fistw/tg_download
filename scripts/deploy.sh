@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================
 # tg-download 一键部署脚本
-# 支持全新机器从零开始部署，包括安装 Python、配置、首次登录
+# 支持全新机器从零开始部署，包括安装 Python、配置、首次登录、前端构建
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,11 +17,12 @@ echo "========================================"
 echo ""
 
 # ----------------------------------------------------------
-# 1. 检查并安装 Python
+# 1. 检查并安装 Python 和 Node.js
 # ----------------------------------------------------------
-check_python() {
-    echo "[1/5] 检查 Python..."
+check_python_node() {
+    echo "[1/6] 检查 Python 和 Node.js..."
 
+    # 检查 Python
     PYTHON_CMD=""
     if command -v python3 &> /dev/null; then
         PYTHON_CMD="python3"
@@ -45,12 +46,33 @@ check_python() {
         PYTHON_CMD="python3"
     fi
 
+    # 检查 Node.js
+    NODE_CMD=""
+    if command -v node &> /dev/null; then
+        NODE_CMD="node"
+        NODE_VERSION=$($NODE_CMD --version)
+        echo "  ✓ Node.js 已安装: $NODE_VERSION"
+    else
+        echo "  Node.js 未安装，正在安装..."
+        if command -v apt-get &> /dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+        elif command -v yum &> /dev/null; then
+            curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+            sudo yum install -y nodejs
+        elif [[ "$(uname)" == "Darwin" ]]; then
+            echo "  请通过 Homebrew 安装: brew install node"
+            read -p "  安装完成后按回车继续..." _
+        fi
+        NODE_CMD="node"
+    fi
+
     # 安装项目依赖
-    echo "  安装项目依赖..."
+    echo "  安装项目 Python 依赖..."
     $PYTHON_CMD -m pip install -e "$PROJECT_DIR" --quiet
     echo "  安装加密加速库 cryptg..."
     $PYTHON_CMD -m pip install cryptg --quiet
-    echo "  ✓ 项目依赖已安装"
+    echo "  ✓ 项目 Python 依赖已安装"
     echo ""
 }
 
@@ -58,7 +80,7 @@ check_python() {
 # 2. 配置文件
 # ----------------------------------------------------------
 setup_config() {
-    echo "[2/5] 配置文件..."
+    echo "[2/6] 配置文件..."
 
     if [ -f config.yaml ]; then
         echo "  config.yaml 已存在"
@@ -107,7 +129,7 @@ setup_config() {
 # 3. 首次登录生成 session
 # ----------------------------------------------------------
 setup_session() {
-    echo "[3/5] Telegram 登录..."
+    echo "[3/6] Telegram 登录..."
 
     if [ -f user_session.session ]; then
         echo "  session 文件已存在"
@@ -148,10 +170,35 @@ asyncio.run(login())
 }
 
 # ----------------------------------------------------------
-# 4. 创建必要目录
+# 4. 构建 React 前端
+# ----------------------------------------------------------
+build_frontend() {
+    echo "[4/6] 构建 React 前端..."
+
+    if [ -d web ]; then
+        cd web
+
+        if [ ! -d node_modules ]; then
+            echo "  安装 npm 依赖..."
+            npm install --quiet
+        fi
+
+        echo "  构建前端..."
+        npm run build --quiet
+
+        cd ..
+        echo "  ✓ React 前端构建完成"
+    else
+        echo "  警告: web 目录不存在，跳过前端构建"
+    fi
+    echo ""
+}
+
+# ----------------------------------------------------------
+# 5. 创建必要目录
 # ----------------------------------------------------------
 setup_dirs() {
-    echo "[4/5] 创建目录..."
+    echo "[5/6] 创建目录..."
 
     mkdir -p downloads
     echo "  ✓ downloads/ 目录已创建"
@@ -159,10 +206,10 @@ setup_dirs() {
 }
 
 # ----------------------------------------------------------
-# 5. 启动服务
+# 6. 启动服务
 # ----------------------------------------------------------
 start_service() {
-    echo "[5/5] 启动服务..."
+    echo "[6/6] 启动服务..."
     echo ""
 
     $PYTHON_CMD -m src serve
@@ -171,6 +218,10 @@ start_service() {
     echo "========================================"
     echo "  部署完成！"
     echo "========================================"
+    echo ""
+    echo "  访问地址:"
+    echo "    新版 Dashboard: http://localhost:8080/dashboard"
+    echo "    旧版 Dashboard: http://localhost:8080/dashboard-legacy"
     echo ""
     echo "  后续可通过以下方式启动:"
     echo "    前台运行:     python3 -m src serve"
@@ -189,8 +240,9 @@ start_service() {
 # ----------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------
-check_python
+check_python_node
 setup_config
 setup_session
+build_frontend
 setup_dirs
 start_service

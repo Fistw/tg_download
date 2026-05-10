@@ -56,6 +56,60 @@ class DownloadDB:
         # 添加 retry_count 字段
         if "retry_count" not in columns:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN retry_count INTEGER DEFAULT 0")
+        
+        # 创建去重任务表
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dedupe_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                chat_title TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                start_message_id INTEGER,
+                last_scanned_message_id INTEGER,
+                total_messages INTEGER,
+                processed_messages INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        
+        # 创建去重媒体表
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dedupe_media (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                file_size INTEGER,
+                duration INTEGER,
+                width INTEGER,
+                height INTEGER,
+                first_seen_message_id INTEGER,
+                first_seen_date TIMESTAMP,
+                occurrence_count INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(task_id, file_id)
+            )
+            """
+        )
+        
+        # 创建去重结果表
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dedupe_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                is_duplicate INTEGER DEFAULT 0,
+                is_original INTEGER DEFAULT 0,
+                downloaded INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
     def create_task(
         self,
@@ -213,6 +267,153 @@ class DownloadDB:
                 (filename, file_size, channel, message_id),
             )
         self._conn.commit()
+
+    def create_dedupe_task(
+        self,
+        chat_id: int,
+        chat_title: Optional[str] = None,
+        start_message_id: Optional[int] = None,
+        total_messages: Optional[int] = None,
+    ) -> int:
+        """创建去重任务，返回 id。"""
+        cur = self._conn.execute(
+            "INSERT INTO dedupe_tasks (chat_id, chat_title, start_message_id, total_messages) "
+            "VALUES (?, ?, ?, ?)",
+            (chat_id, chat_title, start_message_id, total_messages),
+        )
+        self._conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def update_dedupe_task(
+        self,
+        task_id: int,
+        status: Optional[str] = None,
+        last_scanned_message_id: Optional[int] = None,
+        processed_messages: Optional[int] = None,
+    ) -> None:
+        """更新去重任务。"""
+        fields = ["updated_at = CURRENT_TIMESTAMP"]
+        params: list = []
+        
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        
+        if last_scanned_message_id is not None:
+            fields.append("last_scanned_message_id = ?")
+            params.append(last_scanned_message_id)
+        
+        if processed_messages is not None:
+            fields.append("processed_messages = ?")
+            params.append(processed_messages)
+        
+        params.append(task_id)
+        self._conn.execute(
+            f"UPDATE dedupe_tasks SET {', '.join(fields)} WHERE id = ?",
+            params,
+        )
+        self._conn.commit()
+
+    def get_dedupe_task(self, task_id: int) -> Optional[dict]:
+        """获取单条去重任务记录。"""
+        cur = self._conn.execute(
+            "SELECT * FROM dedupe_tasks WHERE id = ?",
+            (task_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+
+    def list_dedupe_tasks(self, limit: int = 50) -> list[dict]:
+        """列出去重任务。"""
+        cur = self._conn.execute(
+            "SELECT * FROM dedupe_tasks ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def add_dedupe_media(
+        self,
+        task_id: int,
+        file_id: str,
+        file_size: Optional[int] = None,
+        duration: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        first_seen_message_id: Optional[int] = None,
+        first_seen_date: Optional[str] = None,
+    ) -> int:
+        """添加去重媒体记录，返回 id。如果已存在则更新 occurrence_count。"""
+        existing = self.get_dedupe_media(task_id, file_id)
+        if existing is not None:
+            self._conn.execute(
+                "UPDATE dedupe_media SET occurrence_count = occurrence_count + 1 WHERE task_id = ? AND file_id = ?",
+                (task_id, file_id),
+            )
+            self._conn.commit()
+            return existing["id"]
+        
+        cur = self._conn.execute(
+            "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date),
+        )
+        self._conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def get_dedupe_media(self, task_id: int, file_id: str) -> Optional[dict]:
+        """获取单条去重媒体记录。"""
+        cur = self._conn.execute(
+            "SELECT * FROM dedupe_media WHERE task_id = ? AND file_id = ?",
+            (task_id, file_id),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+
+    def get_dedupe_media_list(
+        self,
+        task_id: int,
+        page: int = 1,
+        limit: int = 20,
+        search: Optional[str] = None,
+        filter_type: str = 'all',
+    ) -> list[dict]:
+        """获取去重媒体列表，支持分页、搜索和筛选。"""
+        offset = (page - 1) * limit
+        query = "SELECT * FROM dedupe_media WHERE task_id = ?"
+        params: list = [task_id]
+        
+        if search is not None:
+            query += " AND file_id LIKE ?"
+            params.append(f"%{search}%")
+        
+        if filter_type == 'duplicates':
+            query += " AND occurrence_count > 1"
+        elif filter_type == 'singles':
+            query += " AND occurrence_count = 1"
+        
+        query += " ORDER BY occurrence_count DESC, created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        cur = self._conn.execute(query, params)
+        return [dict(row) for row in cur.fetchall()]
+
+    def add_dedupe_result(
+        self,
+        task_id: int,
+        message_id: int,
+        file_id: str,
+        is_duplicate: bool = False,
+        is_original: bool = False,
+        downloaded: bool = False,
+    ) -> int:
+        """添加去重结果，返回 id。"""
+        cur = self._conn.execute(
+            "INSERT INTO dedupe_results (task_id, message_id, file_id, is_duplicate, is_original, downloaded) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, message_id, file_id, int(is_duplicate), int(is_original), int(downloaded)),
+        )
+        self._conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
 
     def close(self) -> None:
         """关闭数据库连接。"""

@@ -17,6 +17,7 @@ from .monitor import start_monitor
 from .bot_handler import setup_bot_handlers
 from .reaction_monitor import start_reaction_monitor
 from .webdav_server import WebDAVServer
+from .deduplicator import Deduplicator
 from .utils import parse_range, format_file_size
 from .cache import cleanup_cache
 
@@ -176,6 +177,9 @@ async def _cmd_serve(args, config) -> None:
     except Exception as e:
         logging.warning(f"无法初始化监控数据库: {e}")
 
+    # 初始化去重器
+    deduper = Deduplicator(manager.user, history)
+    
     # 启动 WebDAV 服务器
     webdav_server = None
     try:
@@ -186,6 +190,9 @@ async def _cmd_serve(args, config) -> None:
             if monitoring_db:
                 from src.webdav_server import set_monitoring_db
                 set_monitoring_db(monitoring_db)
+            # 设置去重器到 web 服务器
+            from src.webdav_server import set_deduplication_resources
+            set_deduplication_resources(deduper, history)
             webdav_server.start()
         except Exception as e:
             logging.error(f"无法启动服务器: {e}")
