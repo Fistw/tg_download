@@ -579,12 +579,24 @@ class MonitoringApp:
             search = query_params.get("search", [None])[0]
             filter_type = query_params.get("filter_type", ["all"])[0]
             
+            # 获取视频时长范围参数
+            min_duration_str = query_params.get("min_duration", [None])[0]
+            max_duration_str = query_params.get("max_duration", [None])[0]
+            min_duration = int(min_duration_str) if min_duration_str and min_duration_str.isdigit() else None
+            max_duration = int(max_duration_str) if max_duration_str and max_duration_str.isdigit() else None
+            
             media_list = []
             total = 0
-            if _deduplicator:
-                media_list = _deduplicator.get_media_list(task_id, page, limit, search, filter_type)
-                # 暂时假设总数就是当前列表长度，实际应该从数据库获取
-                total = len(media_list)
+            if _download_db:
+                media_list, total = _download_db.get_dedupe_media_list(
+                    task_id, 
+                    page, 
+                    limit, 
+                    search, 
+                    filter_type,
+                    min_duration,
+                    max_duration
+                )
             
             total_pages = (total + limit - 1) // limit if limit > 0 else 0
             

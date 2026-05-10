@@ -86,6 +86,8 @@ export const apiClient = {
       limit?: number;
       search?: string;
       filter_type?: string;
+      min_duration?: number;
+      max_duration?: number;
     }
   ): Promise<DedupeMediaListResponse> {
     const response = await api.get(`/dedupe/tasks/${taskId}/media`, { params });

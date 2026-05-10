@@ -1,37 +1,40 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
-    Typography,
-    Box,
-    Paper,
-    Button,
-    Select,
-    MenuItem,
-    InputLabel,
-    FormControl,
-    Table,
-    TableBody,
-    TableCell,
-    TableContainer,
-    TableHead,
-    TableRow,
-    Chip,
-    CircularProgress,
-    Alert,
-    Snackbar,
-    LinearProgress,
-    IconButton,
-    Tooltip,
-    Dialog,
-    DialogTitle,
-    DialogContent,
-    DialogContentText,
-    DialogActions,
+  Typography,
+  Box,
+  Paper,
+  Button,
+  Select,
+  MenuItem,
+  InputLabel,
+  FormControl,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Chip,
+  CircularProgress,
+  Alert,
+  Snackbar,
+  LinearProgress,
+  IconButton,
+  Tooltip,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  TextField,
 } from '@mui/material'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import PauseIcon from '@mui/icons-material/Pause'
 import DownloadIcon from '@mui/icons-material/Download'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import DeleteIcon from '@mui/icons-material/Delete'
+import SearchIcon from '@mui/icons-material/Search'
+import AccessTimeIcon from '@mui/icons-material/AccessTime'
 import { apiClient } from '../api/client'
 import type { ChatInfo, DedupeTask, DedupeMedia } from '../types'
 
@@ -101,6 +104,9 @@ export default function Dedupe() {
   const [loadingMedia, setLoadingMedia] = useState(false)
   const [page, setPage] = useState(1)
   const [filterType, setFilterType] = useState('all')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [minDuration, setMinDuration] = useState<string>('')
+  const [maxDuration, setMaxDuration] = useState<string>('')
   const [notification, setNotification] = useState<{
     message: string
     type: 'success' | 'error'
@@ -171,6 +177,9 @@ export default function Dedupe() {
           page: pageNum,
           limit: 20,
           filter_type: filterType,
+          search: searchQuery || undefined,
+          min_duration: minDuration ? parseInt(minDuration) : undefined,
+          max_duration: maxDuration ? parseInt(maxDuration) : undefined,
         })
         setMediaList(data.items)
         setPagination(data.pagination)
@@ -181,8 +190,29 @@ export default function Dedupe() {
         setLoadingMedia(false)
       }
     },
-    [filterType]
+    [filterType, searchQuery, minDuration, maxDuration]
   )
+
+  // 处理搜索和筛选变化
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value)
+  }
+
+  const handleMinDurationChange = (value: string) => {
+    setMinDuration(value)
+  }
+
+  const handleMaxDurationChange = (value: string) => {
+    setMaxDuration(value)
+  }
+
+  // 重置所有筛选条件
+  const handleResetFilters = () => {
+    setSearchQuery('')
+    setMinDuration('')
+    setMaxDuration('')
+    setFilterType('all')
+  }
 
   useEffect(() => {
     const init = async () => {
@@ -192,11 +222,13 @@ export default function Dedupe() {
     init()
   }, [fetchChats, fetchTasks])
 
+  // 当任务或筛选条件变化时重置页码并获取数据
   useEffect(() => {
     if (currentTask) {
+      setPage(1)
       fetchMedia(currentTask.id, 1)
     }
-  }, [currentTask, fetchMedia])
+  }, [currentTask, filterType, searchQuery, minDuration, maxDuration])
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -511,7 +543,7 @@ export default function Dedupe() {
               <Typography variant="h6" sx={{ fontWeight: 600 }}>
                 媒体列表
               </Typography>
-              <Box sx={{ display: 'flex', gap: 2 }}>
+              <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
                 <FormControl sx={{ minWidth: 120 }}>
                   <Select
                     value={filterType}
@@ -533,6 +565,56 @@ export default function Dedupe() {
                   下载全部
                 </Button>
               </Box>
+            </Box>
+            
+            {/* 搜索和筛选区域 */}
+            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 3, alignItems: 'center' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                <SearchIcon fontSize="small" sx={{ color: 'text.secondary', mr: 1 }} />
+                <TextField
+                  size="small"
+                  placeholder="搜索 File ID..."
+                  value={searchQuery}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  sx={{ width: 220 }}
+                />
+              </Box>
+              
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <AccessTimeIcon fontSize="small" sx={{ color: 'text.secondary' }} />
+                <TextField
+                  size="small"
+                  placeholder="最短 (秒)"
+                  type="number"
+                  value={minDuration}
+                  onChange={(e) => handleMinDurationChange(e.target.value)}
+                  sx={{ width: 130 }}
+                />
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>-</Typography>
+                <TextField
+                  size="small"
+                  placeholder="最长 (秒)"
+                  type="number"
+                  value={maxDuration}
+                  onChange={(e) => handleMaxDurationChange(e.target.value)}
+                  sx={{ width: 130 }}
+                />
+              </Box>
+              
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={handleResetFilters}
+                sx={{ borderRadius: 2 }}
+              >
+                重置
+              </Button>
+              
+              {pagination && (
+                <Typography variant="body2" sx={{ color: 'text.secondary', ml: 'auto' }}>
+                  共 {pagination.total} 条记录
+                </Typography>
+              )}
             </Box>
 
             {loadingMedia ? (

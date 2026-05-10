@@ -631,13 +631,46 @@ class DownloadDB:
         limit: int = 20,
         search: Optional[str] = None,
         filter_type: str = 'all',
-    ) -> list[dict]:
-        """获取去重媒体列表，支持分页、搜索和筛选。"""
+        min_duration: Optional[int] = None,
+        max_duration: Optional[int] = None,
+    ) -> tuple[list[dict], int]:
+        """获取去重媒体列表，支持分页、搜索和筛选。返回 (媒体列表, 总数)"""
         with _db_lock:
             conn = self._get_connection()
             try:
                 offset = (page - 1) * limit
-                query = """
+                base_query = """
+                    FROM dedupe_media m
+                    LEFT JOIN dedupe_results r ON m.task_id = r.task_id AND m.file_id = r.file_id AND r.is_original = 1
+                    WHERE m.task_id = ?
+                """
+                params: list = [task_id]
+                
+                if search is not None:
+                    base_query += " AND m.file_id LIKE ?"
+                    params.append(f"%{search}%")
+                
+                if filter_type == 'duplicates':
+                    base_query += " AND m.occurrence_count > 1"
+                elif filter_type == 'singles':
+                    base_query += " AND m.occurrence_count = 1"
+                
+                if min_duration is not None:
+                    base_query += " AND m.duration >= ?"
+                    params.append(min_duration)
+                
+                if max_duration is not None:
+                    base_query += " AND m.duration <= ?"
+                    params.append(max_duration)
+                
+                # 获取总数
+                count_query = "SELECT COUNT(*) as total " + base_query
+                cur = conn.execute(count_query, params)
+                total_row = cur.fetchone()
+                total = total_row['total'] if total_row else 0
+                
+                # 获取数据
+                data_query = """
                     SELECT 
                         m.id,
                         m.task_id,
@@ -654,25 +687,10 @@ class DownloadDB:
                         m.thumbnail_height,
                         COALESCE(r.is_original, 0) as is_original,
                         COALESCE(r.downloaded, 0) as downloaded
-                    FROM dedupe_media m
-                    LEFT JOIN dedupe_results r ON m.task_id = r.task_id AND m.file_id = r.file_id AND r.is_original = 1
-                    WHERE m.task_id = ?
-                """
-                params: list = [task_id]
+                """ + base_query + " ORDER BY m.occurrence_count DESC, m.created_at DESC LIMIT ? OFFSET ?"
+                data_params = params + [limit, offset]
                 
-                if search is not None:
-                    query += " AND m.file_id LIKE ?"
-                    params.append(f"%{search}%")
-                
-                if filter_type == 'duplicates':
-                    query += " AND m.occurrence_count > 1"
-                elif filter_type == 'singles':
-                    query += " AND m.occurrence_count = 1"
-                
-                query += " ORDER BY m.occurrence_count DESC, m.created_at DESC LIMIT ? OFFSET ?"
-                params.extend([limit, offset])
-                
-                cur = conn.execute(query, params)
+                cur = conn.execute(data_query, data_params)
                 media_list = []
                 for row in cur.fetchall():
                     item = dict(row)
@@ -682,7 +700,7 @@ class DownloadDB:
                     # 添加一个字段，表示是否有缩略图（检查 thumbnail_path 是否存在）
                     item['has_thumbnail'] = bool(item.get('thumbnail_path'))
                     media_list.append(item)
-                return media_list
+                return media_list, total
             finally:
                 conn.close()
 
