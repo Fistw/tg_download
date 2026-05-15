@@ -21,7 +21,7 @@ class DownloadConfig:
     thumbnail_dir: str = "./thumbnails"  # 缩略图存储目录
     max_concurrent: int = 3
     chunk_size_kb: int = 512
-    enable_reaction_download: bool = False
+    enable_reaction_download: bool = True  # 点赞下载功能始终可用
     send_download_to_allowed_users: bool = True
     ask_before_send: bool = True  # 是否在发送前询问用户
     ask_timeout_seconds: int = 300  # 询问超时时间（秒）

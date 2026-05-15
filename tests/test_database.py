@@ -392,12 +392,14 @@ class TestDedupeMedia:
                 db.add_dedupe_media(task_id, file_id=f"file_{i}")
             
             # 第一页
-            page1 = db.get_dedupe_media_list(task_id, page=1, limit=10)
+            page1, total1 = db.get_dedupe_media_list(task_id, page=1, limit=10)
             assert len(page1) == 10
+            assert total1 == 30
             
             # 第二页
-            page2 = db.get_dedupe_media_list(task_id, page=2, limit=10)
+            page2, total2 = db.get_dedupe_media_list(task_id, page=2, limit=10)
             assert len(page2) == 10
+            assert total2 == 30
         finally:
             db.close()
     
@@ -409,8 +411,9 @@ class TestDedupeMedia:
             db.add_dedupe_media(task_id, file_id="test_file_456")
             db.add_dedupe_media(task_id, file_id="other_file_789")
             
-            results = db.get_dedupe_media_list(task_id, search="test")
+            results, total = db.get_dedupe_media_list(task_id, search="test")
             assert len(results) == 2
+            assert total == 2
             assert all("test" in m["file_id"] for m in results)
         finally:
             db.close()
@@ -424,18 +427,21 @@ class TestDedupeMedia:
             db.add_dedupe_media(task_id, file_id="file_dup")
             
             # 筛选重复项
-            duplicates = db.get_dedupe_media_list(task_id, filter_type="duplicates")
+            duplicates, total_dup = db.get_dedupe_media_list(task_id, filter_type="duplicates")
             assert len(duplicates) == 1
+            assert total_dup == 1
             assert duplicates[0]["file_id"] == "file_dup"
             
             # 筛选单项
-            singles = db.get_dedupe_media_list(task_id, filter_type="singles")
+            singles, total_single = db.get_dedupe_media_list(task_id, filter_type="singles")
             assert len(singles) == 1
+            assert total_single == 1
             assert singles[0]["file_id"] == "file_single"
             
             # 筛选全部
-            all_media = db.get_dedupe_media_list(task_id, filter_type="all")
+            all_media, total_all = db.get_dedupe_media_list(task_id, filter_type="all")
             assert len(all_media) == 2
+            assert total_all == 2
         finally:
             db.close()
 

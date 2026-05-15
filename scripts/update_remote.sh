@@ -93,10 +93,17 @@ fi
 echo "✓ 同步成功"
 echo ""
 
-# 2. 连接远程服务器，重启服务
+# 2. 连接远程服务器，添加索引并重启服务
 echo "🔄 连接远程服务器..."
-ssh "$REMOTE_HOST" << 'REMOTE_EOF'
-cd /root/workspace/tg_download || exit 1
+ssh "$REMOTE_HOST" << REMOTE_EOF
+cd "$REMOTE_PATH" || exit 1
+
+echo "🔧 为 SQLite 数据库添加索引..."
+if [ -f "downloads.db" ]; then
+    python3 scripts/add_db_indexes.py downloads.db
+else
+    echo "⚠️  未找到 downloads.db，跳过索引创建"
+fi
 
 echo "🔄 重启 tg-download 服务..."
 if command -v systemctl &> /dev/null; then

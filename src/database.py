@@ -204,6 +204,37 @@ class DownloadDB:
             )
             """
         )
+        
+        # 创建索引以提升查询性能
+        self._create_indexes(conn)
+    
+    def _create_indexes(self, conn):
+        """创建必要的数据库索引以提升查询性能"""
+        # dedupe_media 表的索引
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_media_task_id 
+            ON dedupe_media(task_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_media_task_occurrence 
+            ON dedupe_media(task_id, occurrence_count DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_media_task_duration 
+            ON dedupe_media(task_id, duration)
+        """)
+        
+        # dedupe_results 表的索引
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_results_task_file 
+            ON dedupe_results(task_id, file_id, is_original)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_results_task_id 
+            ON dedupe_results(task_id)
+        """)
+        
+        logger.info("数据库索引创建完成")
 
     def create_task(
         self,
@@ -641,7 +672,6 @@ class DownloadDB:
                 offset = (page - 1) * limit
                 base_query = """
                     FROM dedupe_media m
-                    LEFT JOIN dedupe_results r ON m.task_id = r.task_id AND m.file_id = r.file_id AND r.is_original = 1
                     WHERE m.task_id = ?
                 """
                 params: list = [task_id]
@@ -669,7 +699,7 @@ class DownloadDB:
                 total_row = cur.fetchone()
                 total = total_row['total'] if total_row else 0
                 
-                # 获取数据
+                # 获取数据（先获取媒体信息，然后批量查询 dedupe_results）
                 data_query = """
                     SELECT 
                         m.id,
@@ -684,22 +714,41 @@ class DownloadDB:
                         m.occurrence_count,
                         m.thumbnail_path,
                         m.thumbnail_width,
-                        m.thumbnail_height,
-                        COALESCE(r.is_original, 0) as is_original,
-                        COALESCE(r.downloaded, 0) as downloaded
+                        m.thumbnail_height
                 """ + base_query + " ORDER BY m.occurrence_count DESC, m.created_at DESC LIMIT ? OFFSET ?"
                 data_params = params + [limit, offset]
                 
                 cur = conn.execute(data_query, data_params)
                 media_list = []
+                file_ids = []
                 for row in cur.fetchall():
                     item = dict(row)
-                    # 确保布尔值是 Python 布尔类型
-                    item['is_original'] = bool(item.get('is_original', False))
-                    item['downloaded'] = bool(item.get('downloaded', False))
+                    media_list.append(item)
+                    file_ids.append(item['file_id'])
+                
+                # 批量查询 dedupe_results 获取 is_original 和 downloaded 信息
+                is_original_map = {}
+                downloaded_map = {}
+                if file_ids:
+                    placeholders = ','.join(['?'] * len(file_ids))
+                    results_query = """
+                        SELECT file_id, is_original, downloaded
+                        FROM dedupe_results
+                        WHERE task_id = ? AND file_id IN ({}) AND is_original = 1
+                    """.format(placeholders)
+                    cur = conn.execute(results_query, [task_id] + file_ids)
+                    for row in cur.fetchall():
+                        fid = row['file_id']
+                        is_original_map[fid] = bool(row['is_original'])
+                        downloaded_map[fid] = bool(row['downloaded'])
+                
+                # 完善媒体信息
+                for item in media_list:
+                    item['is_original'] = is_original_map.get(item['file_id'], False)
+                    item['downloaded'] = downloaded_map.get(item['file_id'], False)
                     # 添加一个字段，表示是否有缩略图（检查 thumbnail_path 是否存在）
                     item['has_thumbnail'] = bool(item.get('thumbnail_path'))
-                    media_list.append(item)
+                
                 return media_list, total
             finally:
                 conn.close()

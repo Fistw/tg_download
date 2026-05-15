@@ -292,10 +292,8 @@ async def _download_message_via_event(
 
 async def start_reaction_monitor(client: TelegramClient, config: AppConfig, download_queue=None, history=None, bot_client=None):
     """启动点赞自动下载监控"""
-    if not config.download.enable_reaction_download:
-        logger.warning("💡 Reaction download is disabled in config")
-        return
-
+    # 移除 enable_reaction_download 限制，功能始终可用
+    logger.info("✅ Reaction download function enabled!")
     nas_syncer = NASSyncer(config.nas_sync)
     me = await client.get_me()
     my_user_id = me.id
