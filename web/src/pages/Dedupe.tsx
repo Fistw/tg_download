@@ -27,6 +27,10 @@ import {
   DialogContentText,
   DialogActions,
   TextField,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  Divider,
 } from '@mui/material'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import PauseIcon from '@mui/icons-material/Pause'
@@ -35,8 +39,17 @@ import RefreshIcon from '@mui/icons-material/Refresh'
 import DeleteIcon from '@mui/icons-material/Delete'
 import SearchIcon from '@mui/icons-material/Search'
 import AccessTimeIcon from '@mui/icons-material/AccessTime'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
+import LayersIcon from '@mui/icons-material/Layers'
 import { apiClient } from '../api/client'
-import type { ChatInfo, DedupeTask, DedupeMedia } from '../types'
+import type { 
+  ChatInfo, 
+  DedupeTask, 
+  DedupeMedia, 
+  TwoLevelDedupeSummary,
+  DedupeLevel2Group,
+  DedupeLevel1Group
+} from '../types'
 
 function formatFileSize(bytes: number): string {
   if (!bytes) return '-'
@@ -103,6 +116,7 @@ export default function Dedupe() {
   const [loading, setLoading] = useState(true)
   const [loadingMedia, setLoadingMedia] = useState(false)
   const [page, setPage] = useState(1)
+  const [inputPageValue, setInputPageValue] = useState<string>('1')
   const [filterType, setFilterType] = useState('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [minDuration, setMinDuration] = useState<string>('')
@@ -115,6 +129,11 @@ export default function Dedupe() {
   const [hoveredMedia, setHoveredMedia] = useState<DedupeMedia | null>(null)
   const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 })
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 两层去重相关状态
+  const [dedupeSummary, setDedupeSummary] = useState<TwoLevelDedupeSummary | null>(null)
+  const [loadingDedupe, setLoadingDedupe] = useState(false)
+  const [similarityThreshold, setSimilarityThreshold] = useState<string>('10')
+  const [expandedLevel2Group, setExpandedLevel2Group] = useState<string | null>(null)
   
   // 鼠标悬浮显示预览
   const handleMediaMouseEnter = (media: DedupeMedia, event: React.MouseEvent) => {
@@ -184,6 +203,7 @@ export default function Dedupe() {
         setMediaList(data.items)
         setPagination(data.pagination)
         setPage(pageNum)
+        setInputPageValue(pageNum.toString())
       } catch (err) {
         console.error('Error fetching media:', err)
       } finally {
@@ -348,6 +368,82 @@ export default function Dedupe() {
       showNotification('重置任务失败', 'error')
     }
   }
+
+  // 两层去重相关函数
+  const fetchDedupeSummary = useCallback(async () => {
+    if (!currentTask) return;
+    setLoadingDedupe(true);
+    try {
+      const summary = await apiClient.getTwoLevelDedupeSummary(currentTask.id);
+      setDedupeSummary(summary);
+    } catch (err) {
+      console.error('获取去重汇总失败:', err);
+      setDedupeSummary(null);
+    } finally {
+      setLoadingDedupe(false);
+    }
+  }, [currentTask]);
+
+  const handleRunLevel1Dedupe = async () => {
+    if (!currentTask) return;
+    setLoadingDedupe(true);
+    try {
+      const response = await apiClient.runLevel1Dedupe(currentTask.id);
+      showNotification(response.message, 'success');
+      await fetchDedupeSummary();
+    } catch (err) {
+      showNotification('第一层去重失败', 'error');
+    } finally {
+      setLoadingDedupe(false);
+    }
+  };
+
+  const handleRunLevel2Dedupe = async () => {
+    if (!currentTask) return;
+    setLoadingDedupe(true);
+    try {
+      const threshold = parseInt(similarityThreshold);
+      const response = await apiClient.runLevel2Dedupe(currentTask.id, threshold);
+      showNotification(response.message, 'success');
+      await fetchDedupeSummary();
+    } catch (err) {
+      showNotification('第二层去重失败', 'error');
+    } finally {
+      setLoadingDedupe(false);
+    }
+  };
+
+  const handleRunTwoLevelDedupe = async () => {
+    if (!currentTask) return;
+    setLoadingDedupe(true);
+    try {
+      const threshold = parseInt(similarityThreshold);
+      const response = await apiClient.runTwoLevelDedupe(currentTask.id, threshold);
+      showNotification(response.message, 'success');
+      setDedupeSummary(response.summary);
+    } catch (err) {
+      showNotification('完整两层去重失败', 'error');
+    } finally {
+      setLoadingDedupe(false);
+    }
+  };
+
+  const handleToggleLevel2Group = (groupId: string) => {
+    if (expandedLevel2Group === groupId) {
+      setExpandedLevel2Group(null);
+    } else {
+      setExpandedLevel2Group(groupId);
+    }
+  };
+
+  // 当当前任务变化时，获取去重汇总
+  useEffect(() => {
+    if (currentTask) {
+      fetchDedupeSummary();
+    } else {
+      setDedupeSummary(null);
+    }
+  }, [currentTask, fetchDedupeSummary]);
 
   if (loading) {
     return (
@@ -751,7 +847,7 @@ export default function Dedupe() {
             )}
 
             {pagination && pagination.total_pages > 1 && (
-              <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, mt: 3 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, mt: 3, flexWrap: 'wrap' }}>
                 <Button
                   variant="outlined"
                   disabled={page <= 1}
@@ -760,9 +856,54 @@ export default function Dedupe() {
                 >
                   上一页
                 </Button>
-                <Typography>
-                  第 {page} 页 / 共 {pagination.total_pages} 页
-                </Typography>
+
+                {/* 页码按钮 */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  {(() => {
+                    const pages: number[] = [];
+                    const totalPages = pagination.total_pages;
+                    const currentPage = page;
+                    const showPages = 5; // 最多显示多少个页码按钮
+                    
+                    if (totalPages <= showPages) {
+                      // 如果总页数少于等于显示数，显示全部
+                      for (let i = 1; i <= totalPages; i++) {
+                        pages.push(i);
+                      }
+                    } else {
+                      // 显示当前页前后的一些页码
+                      if (currentPage <= 3) {
+                        // 当前页靠前，显示前几个
+                        for (let i = 1; i <= 5; i++) {
+                          pages.push(i);
+                        }
+                      } else if (currentPage >= totalPages - 2) {
+                        // 当前页靠后，显示后几个
+                        for (let i = totalPages - 4; i <= totalPages; i++) {
+                          pages.push(i);
+                        }
+                      } else {
+                        // 显示中间的页码
+                        for (let i = currentPage - 2; i <= currentPage + 2; i++) {
+                          pages.push(i);
+                        }
+                      }
+                    }
+                    
+                    return pages.map((p) => (
+                      <Button
+                        key={p}
+                        variant={p === page ? 'contained' : 'outlined'}
+                        size="small"
+                        onClick={() => fetchMedia(currentTask.id, p)}
+                        sx={{ borderRadius: 2, minWidth: '40px' }}
+                      >
+                        {p}
+                      </Button>
+                    ));
+                  })()}
+                </Box>
+
                 <Button
                   variant="outlined"
                   disabled={page >= pagination.total_pages}
@@ -771,9 +912,370 @@ export default function Dedupe() {
                 >
                   下一页
                 </Button>
+
+                {/* 总页数显示 */}
+                <Typography variant="body2" sx={{ color: 'text.secondary', ml: 1 }}>
+                  共 {pagination.total_pages} 页
+                </Typography>
+
+                {/* 跳转输入框 */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Typography variant="body2" sx={{ color: 'text.secondary' }}>跳转到</Typography>
+                  <Box
+                    component="input"
+                    type="number"
+                    min={1}
+                    max={pagination.total_pages}
+                    value={inputPageValue}
+                    onChange={(e) => {
+                      setInputPageValue((e.target as HTMLInputElement).value);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const newPage = parseInt(inputPageValue) || 1;
+                        if (newPage >= 1 && newPage <= pagination.total_pages) {
+                          fetchMedia(currentTask.id, newPage);
+                        } else {
+                          setInputPageValue(page.toString());
+                        }
+                      }
+                    }}
+                    onBlur={() => {
+                      const newPage = parseInt(inputPageValue) || 1;
+                      if (newPage >= 1 && newPage <= pagination.total_pages) {
+                        fetchMedia(currentTask.id, newPage);
+                      } else {
+                        setInputPageValue(page.toString());
+                      }
+                    }}
+                    sx={{
+                      width: '70px',
+                      padding: '6px 8px',
+                      borderRadius: '4px',
+                      border: '1px solid #ccc',
+                      fontSize: '14px',
+                      textAlign: 'center',
+                      '&:focus': {
+                        outline: 'none',
+                        borderColor: '#1976d2',
+                        boxShadow: '0 0 0 2px rgba(25, 118, 210, 0.25)',
+                      }
+                    }}
+                  />
+                  <Typography variant="body2" sx={{ color: 'text.secondary' }}>页</Typography>
+                </Box>
               </Box>
             )}
           </Paper>
+
+          {/* 两层去重管理区域 */}
+          {currentTask && (
+            <Paper elevation={1} sx={{ borderRadius: 3, p: 3, mt: 3 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                  <LayersIcon color="primary" />
+                  <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                    两层媒体去重
+                  </Typography>
+                </Box>
+                <Button
+                  variant="outlined"
+                  startIcon={<RefreshIcon />}
+                  onClick={fetchDedupeSummary}
+                  disabled={loadingDedupe}
+                  sx={{ borderRadius: 2 }}
+                >
+                  刷新
+                </Button>
+              </Box>
+
+              {/* 去重操作区域 */}
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mb: 3, alignItems: 'center' }}>
+                <FormControl sx={{ minWidth: 120 }}>
+                  <InputLabel size="small">相似度阈值</InputLabel>
+                  <Select
+                    value={similarityThreshold}
+                    label="相似度阈值"
+                    size="small"
+                    onChange={(e) => setSimilarityThreshold(e.target.value as string)}
+                  >
+                    <MenuItem value="5">5（严格）</MenuItem>
+                    <MenuItem value="10">10（默认）</MenuItem>
+                    <MenuItem value="15">15（宽松）</MenuItem>
+                    <MenuItem value="20">20（非常宽松）</MenuItem>
+                  </Select>
+                </FormControl>
+
+                <Button
+                  variant="outlined"
+                  onClick={handleRunLevel1Dedupe}
+                  disabled={loadingDedupe}
+                  sx={{ borderRadius: 2 }}
+                >
+                  第一层去重
+                </Button>
+
+                <Button
+                  variant="outlined"
+                  onClick={handleRunLevel2Dedupe}
+                  disabled={loadingDedupe}
+                  sx={{ borderRadius: 2 }}
+                >
+                  第二层去重
+                </Button>
+
+                <Button
+                  variant="contained"
+                  onClick={handleRunTwoLevelDedupe}
+                  disabled={loadingDedupe}
+                  sx={{ borderRadius: 2 }}
+                >
+                  完整去重
+                </Button>
+              </Box>
+
+              {/* 加载状态 */}
+              {loadingDedupe && (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                  <CircularProgress />
+                </Box>
+              )}
+
+              {/* 去重结果展示 */}
+              {!loadingDedupe && dedupeSummary && (
+                <Box>
+                  {/* 统计信息 */}
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 3, mb: 3 }}>
+                    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, flex: '1 1 180px', minWidth: 180 }}>
+                      <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
+                        第一层分组数
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                        {dedupeSummary.level1_count}
+                      </Typography>
+                    </Paper>
+                    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, flex: '1 1 180px', minWidth: 180 }}>
+                      <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
+                        第二层分组数
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 700, color: 'warning.main' }}>
+                        {dedupeSummary.level2_count}
+                      </Typography>
+                    </Paper>
+                  </Box>
+
+                  <Divider sx={{ mb: 3 }} />
+
+                  {/* 第二层去重结果展示 */}
+                  {dedupeSummary.level2_count > 0 ? (
+                    <Box>
+                      <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 2 }}>
+                        相似媒体分组
+                      </Typography>
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        {dedupeSummary.level2_groups.map((level2Group) => (
+                          <Accordion
+                            key={level2Group.group_id}
+                            expanded={expandedLevel2Group === level2Group.group_id}
+                            onChange={() => handleToggleLevel2Group(level2Group.group_id)}
+                            sx={{ borderRadius: 2, border: 1, borderColor: 'divider' }}
+                          >
+                            <AccordionSummary
+                              expandIcon={<ExpandMoreIcon />}
+                              sx={{ borderRadius: 2 }}
+                            >
+                              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, flex: 1 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                    分组 {level2Group.group_id}
+                                  </Typography>
+                                  <Chip
+                                    label={`${level2Group.level1_group_ids.length} 个相似组`}
+                                    size="small"
+                                    color="warning"
+                                  />
+                                  {level2Group.similarity_score && (
+                                    <Chip
+                                      label={`相似度: ${(level2Group.similarity_score * 100).toFixed(0)}%`}
+                                      size="small"
+                                      color="primary"
+                                      variant="outlined"
+                                    />
+                                  )}
+                                  {level2Group.hamming_distance !== undefined && (
+                                    <Chip
+                                      label={`汉明距离: ${level2Group.hamming_distance}`}
+                                      size="small"
+                                      color="info"
+                                      variant="outlined"
+                                    />
+                                  )}
+                                </Box>
+                              </Box>
+                            </AccordionSummary>
+                            <AccordionDetails>
+                              {/* 显示该第二层分组下的所有第一层分组 */}
+                              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                {level2Group.level1_groups.map((level1Group) => (
+                                  <Box
+                                    key={level1Group.group_id}
+                                    sx={{
+                                      p: 2,
+                                      borderRadius: 2,
+                                      border: 1,
+                                      borderColor: 'divider',
+                                      bgcolor: 'grey.50',
+                                    }}
+                                  >
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                        子分组 {level1Group.group_id}
+                                      </Typography>
+                                      <Chip
+                                        label={`${level1Group.media_list.length} 个媒体`}
+                                        size="small"
+                                        color="success"
+                                      />
+                                    </Box>
+                                    {/* 展示该第一层分组下的媒体缩略图 */}
+                                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                                      {level1Group.media_list.map((media) => (
+                                        <Box
+                                          key={media.id}
+                                          sx={{
+                                            width: 80,
+                                            height: 45,
+                                            bgcolor: 'grey.200',
+                                            borderRadius: 1,
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            overflow: 'hidden',
+                                          }}
+                                        >
+                                          {media.has_thumbnail ? (
+                                            <img
+                                              src={`/api/dedupe/tasks/${currentTask?.id}/media/${media.id}/thumbnail`}
+                                              alt="缩略图"
+                                              style={{
+                                                width: '100%',
+                                                height: '100%',
+                                                objectFit: 'cover',
+                                              }}
+                                              onMouseEnter={(e) => handleMediaMouseEnter(media, e)}
+                                              onMouseLeave={handleMediaMouseLeave}
+                                              onMouseMove={handleMediaMouseMove}
+                                            />
+                                          ) : (
+                                            <span style={{ color: 'grey.500', fontSize: 14 }}>🎬</span>
+                                          )}
+                                        </Box>
+                                      ))}
+                                    </Box>
+                                  </Box>
+                                ))}
+                              </Box>
+                            </AccordionDetails>
+                          </Accordion>
+                        ))}
+                      </Box>
+                    </Box>
+                  ) : (
+                    /* 如果没有第二层去重结果，只显示第一层结果 */
+                    dedupeSummary.level1_count > 0 && (
+                      <Box>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 2 }}>
+                          第一层去重结果
+                        </Typography>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          {dedupeSummary.level1_groups.slice(0, 10).map((level1Group) => (
+                            <Box
+                              key={level1Group.group_id}
+                              sx={{
+                                p: 2,
+                                borderRadius: 2,
+                                border: 1,
+                                borderColor: 'divider',
+                                bgcolor: 'grey.50',
+                              }}
+                            >
+                              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                  分组 {level1Group.group_id}
+                                </Typography>
+                                <Chip
+                                  label={`${level1Group.media_list.length} 个媒体`}
+                                  size="small"
+                                  color="primary"
+                                />
+                              </Box>
+                              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                                {level1Group.media_list.map((media) => (
+                                  <Box
+                                    key={media.id}
+                                    sx={{
+                                      width: 80,
+                                      height: 45,
+                                      bgcolor: 'grey.200',
+                                      borderRadius: 1,
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      overflow: 'hidden',
+                                    }}
+                                  >
+                                    {media.has_thumbnail ? (
+                                      <img
+                                        src={`/api/dedupe/tasks/${currentTask?.id}/media/${media.id}/thumbnail`}
+                                        alt="缩略图"
+                                        style={{
+                                          width: '100%',
+                                          height: '100%',
+                                          objectFit: 'cover',
+                                        }}
+                                        onMouseEnter={(e) => handleMediaMouseEnter(media, e)}
+                                        onMouseLeave={handleMediaMouseLeave}
+                                        onMouseMove={handleMediaMouseMove}
+                                      />
+                                    ) : (
+                                      <span style={{ color: 'grey.500', fontSize: 14 }}>🎬</span>
+                                    )}
+                                  </Box>
+                                ))}
+                              </Box>
+                            </Box>
+                          ))}
+                          {dedupeSummary.level1_count > 10 && (
+                            <Typography variant="body2" sx={{ color: 'text.secondary', textAlign: 'center' }}>
+                              ...还有 {dedupeSummary.level1_count - 10} 个分组
+                            </Typography>
+                          )}
+                        </Box>
+                      </Box>
+                    )
+                  )}
+
+                  {/* 如果没有任何去重结果 */}
+                  {!loadingDedupe && dedupeSummary && dedupeSummary.level1_count === 0 && (
+                    <Box sx={{ textAlign: 'center', py: 4 }}>
+                      <Typography sx={{ color: 'text.secondary', mb: 2 }}>
+                        暂无去重结果，请点击"完整去重"开始
+                      </Typography>
+                    </Box>
+                  )}
+                </Box>
+              )}
+
+              {/* 如果没有去重摘要信息 */}
+              {!loadingDedupe && !dedupeSummary && (
+                <Box sx={{ textAlign: 'center', py: 4 }}>
+                  <Typography sx={{ color: 'text.secondary' }}>
+                    点击"完整去重"开始分析媒体文件
+                  </Typography>
+                </Box>
+              )}
+            </Paper>
+          )}
 
           {tasks.length > 0 && (
             <Paper elevation={1} sx={{ borderRadius: 3, p: 3, mt: 3 }}>

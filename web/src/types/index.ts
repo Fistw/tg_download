@@ -112,3 +112,51 @@ export interface DownloadMediaRequest {
   download_all?: boolean;
   output_dir?: string;
 }
+
+// 两层去重相关类型
+export interface DedupeLevel1Group {
+  group_id: string;
+  primary_media_id: number;
+  primary_file_id: string;
+  media_ids: number[];
+  media_list: DedupeMedia[];
+}
+
+export interface DedupeLevel2Group {
+  group_id: string;
+  primary_level1_group_id: string;
+  level1_group_ids: string[];
+  level1_groups: DedupeLevel1Group[];
+  similarity_score?: number;
+  hamming_distance?: number;
+}
+
+export interface TwoLevelDedupeSummary {
+  task_id: number;
+  level1_groups: DedupeLevel1Group[];
+  level1_count: number;
+  level2_groups: DedupeLevel2Group[];
+  level2_count: number;
+}
+
+export interface RunTwoLevelDedupeRequest {
+  similarity_threshold?: number;
+}
+
+export interface RunLevel1DedupeResponse {
+  success: boolean;
+  message: string;
+  level1_count: number;
+}
+
+export interface RunLevel2DedupeResponse {
+  success: boolean;
+  message: string;
+  level2_count: number;
+}
+
+export interface RunTwoLevelDedupeResponse {
+  success: boolean;
+  message: string;
+  summary: TwoLevelDedupeSummary;
+}

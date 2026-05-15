@@ -94,7 +94,6 @@ class MonitoringApp:
         self.sessions = {}  # 存储会话
         self.session_expiry = 7 * 24 * 60 * 60  # 会话有效期：7天
         self.routes = {
-            "/": self.handle_dashboard,
             "/dashboard": self.handle_dashboard,
             "/dashboard-legacy": self.handle_dashboard_legacy,
             "/api/dashboard/stats": self.handle_api_stats,
@@ -296,10 +295,10 @@ class MonitoringApp:
         if handler:
             return handler(environ, start_response)
 
-        # 检查是否是新版 React 应用的前端路由（需要返回 index.html）
-        if self.web_dist_dir.exists():
+        # 默认：如果是 /dashboard 下的路由，返回 React 应用，否则返回 404
+        if path.startswith("/dashboard") and self.web_dist_dir.exists():
             return self.handle_dashboard(environ, start_response)
-
+        
         # 默认返回 404
         start_response("404 Not Found", [("Content-Type", "text/plain; charset=utf-8")])
         return [b"404 Not Found"]
@@ -349,6 +348,19 @@ class MonitoringApp:
                 # POST /api/dedupe/tasks/{task_id}/download
                 if len(parts) == 6 and parts[5] == "download" and method == "POST":
                     return lambda e, s: self.handle_api_dedupe_task_download(e, s, task_id)
+                # 两层去重相关端点
+                # POST /api/dedupe/tasks/{task_id}/dedupe/level1
+                if len(parts) == 7 and parts[5] == "dedupe" and parts[6] == "level1" and method == "POST":
+                    return lambda e, s: self.handle_api_dedupe_task_level1(e, s, task_id)
+                # POST /api/dedupe/tasks/{task_id}/dedupe/level2
+                if len(parts) == 7 and parts[5] == "dedupe" and parts[6] == "level2" and method == "POST":
+                    return lambda e, s: self.handle_api_dedupe_task_level2(e, s, task_id)
+                # POST /api/dedupe/tasks/{task_id}/dedupe/two-level
+                if len(parts) == 7 and parts[5] == "dedupe" and parts[6] == "two-level" and method == "POST":
+                    return lambda e, s: self.handle_api_dedupe_task_two_level(e, s, task_id)
+                # GET /api/dedupe/tasks/{task_id}/dedupe/summary
+                if len(parts) == 7 and parts[5] == "dedupe" and parts[6] == "summary" and method == "GET":
+                    return lambda e, s: self.handle_api_dedupe_task_summary(e, s, task_id)
                 # GET /api/dedupe/tasks/{task_id}/media/{id_or_file_id}/thumbnail
                 if len(parts) == 7 and parts[5] == "media" and parts[6] == "thumbnail":
                     # 这种情况没有提供 media_id 或 file_id，不处理
@@ -732,13 +744,25 @@ class MonitoringApp:
                 start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
+            # 计算要下载的数量
+            downloaded_count = 0
+            if _download_db:
+                if download_all:
+                    # 获取所有独特和重复媒体的总数（不限制分页）
+                    media_list, total_singles = _download_db.get_dedupe_media_list(task_id, filter_type="singles", limit=10000)
+                    duplicates, total_duplicates = _download_db.get_dedupe_media_list(task_id, filter_type="duplicates", limit=10000)
+                    downloaded_count = total_singles + total_duplicates
+                elif file_id:
+                    media = _download_db.get_dedupe_media(task_id, file_id)
+                    downloaded_count = 1 if media else 0
+            
             # 在主事件循环中运行下载任务
             asyncio.run_coroutine_threadsafe(
                 _deduplicator.download_media(task_id, output_dir, file_id=file_id, download_all=download_all),
                 _main_event_loop
             )
             
-            response = json.dumps({"success": True, "message": "下载任务已启动"}, ensure_ascii=False).encode("utf-8")
+            response = json.dumps({"success": True, "message": "下载任务已启动", "downloaded_count": downloaded_count}, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
@@ -817,6 +841,88 @@ class MonitoringApp:
             start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
             return [error]
 
+    def handle_api_dedupe_task_level1(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/dedupe/level1 - 运行第一层去重"""
+        try:
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            level1_count = _deduplicator.run_level1_dedupe(task_id)
+            
+            response = json.dumps({"success": True, "message": f"第一层去重完成，共 {level1_count} 个分组", "level1_count": level1_count}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"第一层去重失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_level2(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/dedupe/level2 - 运行第二层去重"""
+        try:
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            body = self._read_request_body(environ)
+            similarity_threshold = body.get("similarity_threshold")
+            
+            level2_count = _deduplicator.run_level2_dedupe(task_id, similarity_threshold)
+            
+            response = json.dumps({"success": True, "message": f"第二层去重完成，共 {level2_count} 个分组", "level2_count": level2_count}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"第二层去重失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_two_level(self, environ, start_response, task_id: int):
+        """POST /api/dedupe/tasks/{task_id}/dedupe/two-level - 运行完整两层去重"""
+        try:
+            if not _deduplicator:
+                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            body = self._read_request_body(environ)
+            similarity_threshold = body.get("similarity_threshold")
+            
+            summary = _deduplicator.run_two_level_dedupe(task_id, similarity_threshold)
+            
+            response = json.dumps({"success": True, "message": "完整两层去重完成", "summary": summary}, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"完整两层去重失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_summary(self, environ, start_response, task_id: int):
+        """GET /api/dedupe/tasks/{task_id}/dedupe/summary - 获取两层去重汇总"""
+        try:
+            if not _download_db:
+                error = json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+            
+            summary = _download_db.get_two_level_dedupe_summary(task_id)
+            
+            response = json.dumps(summary, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"获取去重汇总失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
 
 class CombinedApp:
     """组合 WSGI 应用（支持 WebDAV 和监控），监控需要认证，WebDAV 使用自己的认证"""
@@ -835,7 +941,7 @@ class CombinedApp:
             return [b"OK"]
         
         # 监控路由 - 使用监控应用（带认证）
-        if path == "/" or path.startswith("/dashboard") or path.startswith("/api/") or path.startswith("/static/") or path.startswith("/assets/") or path == "/favicon.svg" or path == "/icons.svg":
+        if path.startswith("/dashboard") or path.startswith("/api/") or path.startswith("/static/") or path.startswith("/assets/") or path == "/favicon.svg" or path == "/icons.svg":
             return self.monitoring_app(environ, start_response)
         
         # WebDAV 路由 - 使用 WebDAV 应用（带自己的认证）
@@ -1073,7 +1179,7 @@ class WebDAVServer:
             logger.info(f"服务器启动在 http://{self.config.host}:{self.config.port}")
             logger.info(f"监控看板: http://{self.config.host}:{self.config.port}/dashboard")
             if self.config.enable:
-                logger.info(f"WebDAV: http://{self.config.host}:{self.config.port}{self.config.mount_path}")
+                logger.info(f"WebDAV: http://{self.config.host}:{self.config.port}/")
 
             try:
                 self._httpd.serve_forever()

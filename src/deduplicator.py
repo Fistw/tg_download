@@ -5,7 +5,7 @@ import io
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaDocument
@@ -13,6 +13,7 @@ from telethon.tl.types import MessageMediaDocument
 from .database import DownloadDB
 from .limiter import FloodWaitCoordinator, get_flood_coordinator
 from .downloader import download_message, _is_video
+from .image_similarity import ImageSimilarity
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +349,8 @@ class Deduplicator:
         filter_type: str = "all",
     ) -> list[dict]:
         """获取媒体列表。"""
-        return self._db.get_dedupe_media_list(task_id, page, limit, search, filter_type)
+        media_list, _ = self._db.get_dedupe_media_list(task_id, page, limit, search, filter_type)
+        return media_list
 
     async def download_media(
         self,
@@ -413,3 +415,234 @@ class Deduplicator:
                 continue
 
         return downloaded_count
+
+    def compute_phashes_for_task(self, task_id: int) -> int:
+        """
+        为任务中的所有媒体计算感知哈希
+        
+        Args:
+            task_id: 去重任务ID
+            
+        Returns:
+            成功计算哈希的媒体数量
+        """
+        logger.info(f"开始为任务 {task_id} 计算感知哈希")
+        
+        # 获取该任务的所有媒体
+        media_list, _ = self._db.get_dedupe_media_list(task_id, limit=10000)
+        
+        similarity = ImageSimilarity()
+        count = 0
+        
+        for media in media_list:
+            media_id = media['id']
+            file_id = media['file_id']
+            
+            # 如果已经有phash则跳过
+            if media.get('phash'):
+                continue
+                
+            # 尝试获取缩略图
+            thumbnail = self._db.get_dedupe_media_thumbnail(task_id, media_id=media_id)
+            if thumbnail and thumbnail.get('thumbnail_path'):
+                try:
+                    # 从文件系统读取缩略图
+                    thumbnail_data = self._db.thumbnail_store.load(thumbnail['thumbnail_path'])
+                    if thumbnail_data:
+                        phash = similarity.compute_hash(thumbnail_data)
+                        if phash:
+                            self._db.update_media_phash(task_id, file_id, phash)
+                            count += 1
+                            logger.debug(f"为媒体 {file_id} 计算哈希: {phash}")
+                except Exception as e:
+                    logger.debug(f"计算媒体 {file_id} 哈希失败: {e}")
+        
+        logger.info(f"任务 {task_id} 完成哈希计算，共 {count} 个媒体")
+        return count
+
+    def run_level1_dedupe(self, task_id: int) -> int:
+        """
+        运行第一层去重（基于 file_id）
+        
+        Args:
+            task_id: 去重任务ID
+            
+        Returns:
+            第一层去重组数
+        """
+        logger.info(f"开始任务 {task_id} 第一层去重（基于 file_id）")
+        
+        # 清除旧结果
+        self._db.clear_dedupe_results(task_id)
+        
+        # 获取所有媒体
+        media_list, _ = self._db.get_dedupe_media_list(task_id, limit=10000)
+        
+        # 按 file_id 分组
+        file_id_groups: Dict[str, List[Dict]] = {}
+        for media in media_list:
+            file_id = media['file_id']
+            if file_id not in file_id_groups:
+                file_id_groups[file_id] = []
+            file_id_groups[file_id].append(media)
+        
+        # 创建第一层去重结果
+        group_count = 0
+        for file_id, group_media in file_id_groups.items():
+            # 选择最早出现的作为主媒体
+            primary_media = min(group_media, key=lambda m: m['first_seen_message_id'] or 0)
+            media_ids = [m['id'] for m in group_media]
+            
+            self._db.add_dedupe_level1(
+                task_id, file_id, primary_media['id'], media_ids)
+            group_count += 1
+        
+        logger.info(f"任务 {task_id} 第一层去重完成，共 {group_count} 组")
+        return group_count
+
+    def run_level2_dedupe(
+        self,
+        task_id: int,
+        similarity_threshold: Optional[int] = None
+    ) -> int:
+        """
+        运行第二层去重（基于图片相似度）
+        
+        Args:
+            task_id: 去重任务ID
+            similarity_threshold: 汉明距离阈值，默认使用 ImageSimilarity.DEFAULT_SIMILARITY_THRESHOLD
+            
+        Returns:
+            第二层去重组数
+        """
+        logger.info(f"开始任务 {task_id} 第二层去重（基于图片相似度）")
+        
+        similarity = ImageSimilarity(
+            similarity_threshold or ImageSimilarity.DEFAULT_SIMILARITY_THRESHOLD
+        )
+        
+        # 获取第一层去重结果
+        level1_groups = self._db.get_dedupe_level1(task_id)
+        
+        # 获取所有有 phash 的媒体
+        media_with_phash = self._db.get_media_with_phash(task_id)
+        media_by_id = {m['id']: m for m in media_with_phash}
+        
+        # 为每个 level1 组计算代表哈希
+        group_phashes: Dict[str, Dict[str, Any]] = {}
+        for group in level1_groups:
+            # 在组内找有 phash 的媒体
+            for media_id in group['media_ids']:
+                if media_id in media_by_id:
+                    media = media_by_id[media_id]
+                    if media.get('phash'):
+                        group_phashes[group['group_id']] = {
+                            'phash': media['phash'],
+                            'group': group
+                        }
+                        break
+        
+        # 对第一层组进行相似度分组
+        used_groups = set()
+        level2_groups = []
+        
+        group_ids = list(group_phashes.keys())
+        for i, group_id1 in enumerate(group_ids):
+            if group_id1 in used_groups:
+                continue
+                
+            current_group = group_phashes[group_id1]
+            similar_groups = [group_id1]
+            used_groups.add(group_id1)
+            min_distance = None
+            
+            for j in range(i + 1, len(group_ids)):
+                group_id2 = group_ids[j]
+                if group_id2 in used_groups:
+                    continue
+                    
+                group2 = group_phashes[group_id2]
+                
+                # 计算相似度
+                is_similar, distance = similarity.is_similar(
+                    current_group['phash'], group2['phash']
+                )
+                
+                if is_similar:
+                    similar_groups.append(group_id2)
+                    used_groups.add(group_id2)
+                    if min_distance is None or distance < min_distance:
+                        min_distance = distance
+                    logger.debug(
+                        f"组 {group_id1} 和 {group_id2} 相似，距离: {distance}"
+                    )
+            
+            if len(similar_groups) > 1:
+                # 计算相似度分数
+                score = similarity.similarity_score(
+                    current_group['phash'],
+                    group_phashes[similar_groups[1]]['phash']
+                )
+                
+                level2_groups.append({
+                    'primary_group_id': group_id1,
+                    'group_ids': similar_groups,
+                    'similarity_score': score,
+                    'hamming_distance': min_distance
+                })
+        
+        # 保存第二层去重结果
+        for i, lg in enumerate(level2_groups):
+            self._db.add_dedupe_level2(
+                task_id,
+                f"level2_group_{i}",
+                lg['primary_group_id'],
+                lg['group_ids'],
+                lg['similarity_score'],
+                lg['hamming_distance']
+            )
+        
+        logger.info(f"任务 {task_id} 第二层去重完成，共 {len(level2_groups)} 组")
+        return len(level2_groups)
+
+    def run_two_level_dedupe(
+        self,
+        task_id: int,
+        similarity_threshold: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        运行完整的两层去重流程
+        
+        Args:
+            task_id: 去重任务ID
+            similarity_threshold: 汉明距离阈值
+            
+        Returns:
+            去重汇总结果
+        """
+        logger.info(f"开始任务 {task_id} 完整两层去重流程")
+        
+        # 1. 计算感知哈希
+        phash_count = self.compute_phashes_for_task(task_id)
+        
+        # 2. 第一层去重
+        level1_count = self.run_level1_dedupe(task_id)
+        
+        # 3. 第二层去重
+        level2_count = self.run_level2_dedupe(task_id, similarity_threshold)
+        
+        # 获取汇总结果
+        summary = self._db.get_two_level_dedupe_summary(task_id)
+        
+        logger.info(
+            f"任务 {task_id} 两层去重完成: "
+            f"{phash_count} 个哈希, "
+            f"{level1_count} 第一层组, "
+            f"{level2_count} 第二层组"
+        )
+        
+        return summary
+
+    def get_two_level_dedupe_summary(self, task_id: int) -> Dict[str, Any]:
+        """获取两层去重汇总结果"""
+        return self._db.get_two_level_dedupe_summary(task_id)

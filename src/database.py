@@ -4,7 +4,7 @@ import sqlite3
 import threading
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from .thumbnail_store import ThumbnailStore
 
@@ -167,6 +167,7 @@ class DownloadDB:
                 thumbnail_path TEXT,
                 thumbnail_width INTEGER,
                 thumbnail_height INTEGER,
+                phash TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(task_id, file_id)
             )
@@ -185,6 +186,8 @@ class DownloadDB:
             conn.execute("ALTER TABLE dedupe_media ADD COLUMN thumbnail_width INTEGER")
         if "thumbnail_height" not in dedupe_media_columns:
             conn.execute("ALTER TABLE dedupe_media ADD COLUMN thumbnail_height INTEGER")
+        if "phash" not in dedupe_media_columns:
+            conn.execute("ALTER TABLE dedupe_media ADD COLUMN phash TEXT")
         
         # 迁移旧的 BLOB 数据到文件系统（如果存在）
         self._migrate_blob_thumbnails(conn)
@@ -201,6 +204,38 @@ class DownloadDB:
                 is_original INTEGER DEFAULT 0,
                 downloaded INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        
+        # 创建第一层去重结果表（基于file_id）
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dedupe_level1 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                group_id TEXT NOT NULL,
+                primary_media_id INTEGER NOT NULL,
+                media_ids TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(task_id, group_id)
+            )
+            """
+        )
+        
+        # 创建第二层去重结果表（基于图片相似度）
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dedupe_level2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                group_id TEXT NOT NULL,
+                primary_level1_group_id TEXT NOT NULL,
+                level1_group_ids TEXT NOT NULL,
+                similarity_score REAL,
+                hamming_distance INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(task_id, group_id)
             )
             """
         )
@@ -569,6 +604,7 @@ class DownloadDB:
         thumbnail_path: Optional[str] = None,
         thumbnail_width: Optional[int] = None,
         thumbnail_height: Optional[int] = None,
+        phash: Optional[str] = None,
     ) -> int:
         """添加去重媒体记录，返回 id。如果已存在则更新 occurrence_count。"""
         with _db_lock:
@@ -592,9 +628,9 @@ class DownloadDB:
                         logger.warning(f"保存缩略图到文件系统失败: {e}")
                 
                 cur = conn.execute(
-                    "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, thumbnail_path, thumbnail_width, thumbnail_height) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, final_thumbnail_path, thumbnail_width, thumbnail_height),
+                    "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, thumbnail_path, thumbnail_width, thumbnail_height, phash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, final_thumbnail_path, thumbnail_width, thumbnail_height, phash),
                 )
                 conn.commit()
                 return cur.lastrowid  # type: ignore[return-value]
@@ -805,8 +841,8 @@ class DownloadDB:
                                 logger.warning(f"批量保存缩略图到文件系统失败: {e}")
                         
                         conn.execute(
-                            "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, thumbnail_path, thumbnail_width, thumbnail_height) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO dedupe_media (task_id, file_id, file_size, duration, width, height, first_seen_message_id, first_seen_date, thumbnail_path, thumbnail_width, thumbnail_height, phash) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 media['task_id'],
                                 media['file_id'],
@@ -819,6 +855,7 @@ class DownloadDB:
                                 thumbnail_path,
                                 media.get('thumbnail_width'),
                                 media.get('thumbnail_height'),
+                                media.get('phash'),
                             ),
                         )
                 conn.commit()
@@ -901,6 +938,210 @@ class DownloadDB:
                     "UPDATE dedupe_tasks SET status = 'pending', last_scanned_message_id = NULL, processed_messages = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (task_id,),
                 )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def update_media_phash(
+        self, task_id: int, file_id: str, phash: Optional[str]
+    ) -> None:
+        """更新媒体的感知哈希"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    "UPDATE dedupe_media SET phash = ? WHERE task_id = ? AND file_id = ?",
+                    (phash, task_id, file_id)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_media_with_phash(self, task_id: int) -> List[Dict[str, Any]]:
+        """获取所有有感知哈希的媒体"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT id, task_id, file_id, phash, file_size, duration,
+                           thumbnail_path, first_seen_message_id
+                    FROM dedupe_media
+                    WHERE task_id = ? AND phash IS NOT NULL
+                    """,
+                    (task_id,)
+                )
+                return [dict(row) for row in cursor.fetchall()]
+            finally:
+                conn.close()
+
+    def add_dedupe_level1(
+        self,
+        task_id: int,
+        group_id: str,
+        primary_media_id: int,
+        media_ids: List[int]
+    ) -> int:
+        """添加第一层去重结果"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                media_ids_str = ",".join(str(id) for id in media_ids)
+                cursor = conn.execute(
+                    """
+                    INSERT OR REPLACE INTO dedupe_level1
+                    (task_id, group_id, primary_media_id, media_ids)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, group_id, primary_media_id, media_ids_str)
+                )
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+
+    def get_dedupe_level1(self, task_id: int) -> List[Dict[str, Any]]:
+        """获取第一层去重结果"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT dl1.*, dm.file_id as primary_file_id
+                    FROM dedupe_level1 dl1
+                    JOIN dedupe_media dm ON dl1.primary_media_id = dm.id
+                    WHERE dl1.task_id = ?
+                    ORDER BY dl1.id
+                    """,
+                    (task_id,)
+                )
+                results = []
+                for row in cursor.fetchall():
+                    row_dict = dict(row)
+                    row_dict["media_ids"] = [
+                        int(id) for id in row_dict["media_ids"].split(",") if id
+                    ]
+                    results.append(row_dict)
+                return results
+            finally:
+                conn.close()
+
+    def add_dedupe_level2(
+        self,
+        task_id: int,
+        group_id: str,
+        primary_level1_group_id: str,
+        level1_group_ids: List[str],
+        similarity_score: Optional[float] = None,
+        hamming_distance: Optional[int] = None
+    ) -> int:
+        """添加第二层去重结果"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                level1_group_ids_str = ",".join(level1_group_ids)
+                cursor = conn.execute(
+                    """
+                    INSERT OR REPLACE INTO dedupe_level2
+                    (task_id, group_id, primary_level1_group_id, level1_group_ids,
+                     similarity_score, hamming_distance)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (task_id, group_id, primary_level1_group_id, level1_group_ids_str,
+                     similarity_score, hamming_distance)
+                )
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+
+    def get_dedupe_level2(self, task_id: int) -> List[Dict[str, Any]]:
+        """获取第二层去重结果"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT * FROM dedupe_level2
+                    WHERE task_id = ?
+                    ORDER BY id
+                    """,
+                    (task_id,)
+                )
+                results = []
+                for row in cursor.fetchall():
+                    row_dict = dict(row)
+                    row_dict["level1_group_ids"] = row_dict["level1_group_ids"].split(",")
+                    results.append(row_dict)
+                return results
+            finally:
+                conn.close()
+
+    def get_two_level_dedupe_summary(self, task_id: int) -> Dict[str, Any]:
+        """获取两层去重的汇总结果"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                # 获取第一层去重信息
+                level1 = self.get_dedupe_level1(task_id)
+                
+                # 获取第二层去重信息
+                level2 = self.get_dedupe_level2(task_id)
+                
+                # 构建详细的结果结构
+                level1_detail = {}
+                for g in level1:
+                    # 获取该组的所有媒体详情
+                    placeholders = ",".join(["?"] * len(g["media_ids"]))
+                    cursor = conn.execute(
+                        f"""
+                        SELECT id, file_id, file_size, duration, thumbnail_path,
+                               phash, first_seen_message_id, first_seen_date
+                        FROM dedupe_media
+                        WHERE id IN ({placeholders})
+                        """,
+                        g["media_ids"]
+                    )
+                    media_list = [dict(row) for row in cursor.fetchall()]
+                    level1_detail[g["group_id"]] = {
+                        "group_id": g["group_id"],
+                        "primary_media_id": g["primary_media_id"],
+                        "primary_file_id": g["primary_file_id"],
+                        "media_list": media_list
+                    }
+                
+                # 构建第二层结果详情
+                level2_detail = []
+                for g in level2:
+                    level1_groups = []
+                    for level1_group_id in g["level1_group_ids"]:
+                        if level1_group_id in level1_detail:
+                            level1_groups.append(level1_detail[level1_group_id])
+                    level2_detail.append({
+                        "group_id": g["group_id"],
+                        "primary_level1_group_id": g["primary_level1_group_id"],
+                        "level1_groups": level1_groups,
+                        "similarity_score": g["similarity_score"],
+                        "hamming_distance": g["hamming_distance"]
+                    })
+                
+                return {
+                    "task_id": task_id,
+                    "level1_groups": level1,
+                    "level1_count": len(level1),
+                    "level2_groups": level2_detail,
+                    "level2_count": len(level2)
+                }
+            finally:
+                conn.close()
+
+    def clear_dedupe_results(self, task_id: int) -> None:
+        """清除任务的去重结果"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("DELETE FROM dedupe_level1 WHERE task_id = ?", (task_id,))
+                conn.execute("DELETE FROM dedupe_level2 WHERE task_id = ?", (task_id,))
                 conn.commit()
             finally:
                 conn.close()
