@@ -1,0 +1,16 @@
+[Unit]
+Description=tg-download Database Backup Timer
+Documentation=https://github.com/your/repo
+
+[Timer]
+# 每日凌晨 02:00 执行备份
+OnCalendar=*-*-* 02:00:00
+# 开机后立即执行一次（可选）
+# Persistent=true
+# 避免同时运行
+AccuracySec=1min
+# 不要并行运行
+RandomizedDelaySec=0
+
+[Install]
+WantedBy=timers.target

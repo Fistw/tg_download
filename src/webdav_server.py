@@ -349,9 +349,6 @@ class MonitoringApp:
                 if len(parts) == 6 and parts[5] == "download" and method == "POST":
                     return lambda e, s: self.handle_api_dedupe_task_download(e, s, task_id)
                 # 两层去重相关端点
-                # POST /api/dedupe/tasks/{task_id}/dedupe/level1
-                if len(parts) == 7 and parts[5] == "dedupe" and parts[6] == "level1" and method == "POST":
-                    return lambda e, s: self.handle_api_dedupe_task_level1(e, s, task_id)
                 # POST /api/dedupe/tasks/{task_id}/dedupe/level2
                 if len(parts) == 7 and parts[5] == "dedupe" and parts[6] == "level2" and method == "POST":
                     return lambda e, s: self.handle_api_dedupe_task_level2(e, s, task_id)
@@ -837,25 +834,6 @@ class MonitoringApp:
             return [response]
         except Exception as e:
             logger.error(f"重置任务失败: {e}")
-            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
-            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-            return [error]
-
-    def handle_api_dedupe_task_level1(self, environ, start_response, task_id: int):
-        """POST /api/dedupe/tasks/{task_id}/dedupe/level1 - 运行第一层去重"""
-        try:
-            if not _deduplicator:
-                error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            level1_count = _deduplicator.run_level1_dedupe(task_id)
-            
-            response = json.dumps({"success": True, "message": f"第一层去重完成，共 {level1_count} 个分组", "level1_count": level1_count}, ensure_ascii=False).encode("utf-8")
-            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
-            return [response]
-        except Exception as e:
-            logger.error(f"第一层去重失败: {e}")
             error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
             start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
             return [error]

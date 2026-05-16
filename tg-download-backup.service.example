@@ -1,0 +1,18 @@
+[Unit]
+Description=tg-download Database Backup Service
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/workspace/tg_download
+ExecStart=/root/workspace/tg_download/scripts/backup_db.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tg-download-backup
+
+# 防止备份期间服务被停止
+TimeoutStartSec=infinity
+
+# 如果备份失败，不要重启
+Restart=no

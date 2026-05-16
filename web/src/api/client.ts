@@ -10,8 +10,6 @@ import type {
   CreateDedupeTaskRequest,
   DownloadMediaRequest,
   TwoLevelDedupeSummary,
-  RunTwoLevelDedupeRequest,
-  RunLevel1DedupeResponse,
   RunLevel2DedupeResponse,
   RunTwoLevelDedupeResponse,
 } from '../types';
@@ -138,11 +136,6 @@ export const apiClient = {
   },
 
   // 两层去重相关 API
-  async runLevel1Dedupe(taskId: number): Promise<RunLevel1DedupeResponse> {
-    const response = await api.post(`/dedupe/tasks/${taskId}/dedupe/level1`);
-    return response.data;
-  },
-
   async runLevel2Dedupe(taskId: number, similarityThreshold?: number): Promise<RunLevel2DedupeResponse> {
     const response = await api.post(`/dedupe/tasks/${taskId}/dedupe/level2`, {
       similarity_threshold: similarityThreshold,

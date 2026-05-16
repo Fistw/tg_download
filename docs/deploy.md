@@ -23,7 +23,7 @@ cd tg_download
 
 ---
 
-## 手动部署
+## 本地开发部署
 
 ### 第一步：安装 Python、Node.js 并安装依赖
 
@@ -143,6 +143,145 @@ journalctl -u tg-download -f
 
 ---
 
+## 数据库自动备份
+
+### 手动备份（随时可用）
+
+```bash
+# 在项目目录下执行
+./scripts/backup_db.sh
+```
+
+备份会保存到 `backups/` 目录，文件名包含日期时间：
+- `downloads_20260516_020000.db.gz`
+- `monitoring_20260516_020000.db.gz`
+
+### 自动备份（每日凌晨，推荐）
+
+使用 systemd timer 配置每日自动备份：
+
+```bash
+# 1. 复制备份服务配置
+sudo cp tg-download-backup.service.example /etc/systemd/system/tg-download-backup.service
+sudo cp tg-download-backup.timer.example /etc/systemd/system/tg-download-backup.timer
+
+# 2. 根据需要编辑服务文件中的路径和用户
+sudo nano /etc/systemd/system/tg-download-backup.service
+
+# 3. 重新加载 systemd 配置
+sudo systemctl daemon-reload
+
+# 4. 启用并启动 timer
+sudo systemctl enable tg-download-backup.timer
+sudo systemctl start tg-download-backup.timer
+
+# 5. 查看 timer 状态
+sudo systemctl list-timers | grep tg-download-backup
+
+# 6. 手动触发一次备份（测试用）
+sudo systemctl start tg-download-backup.service
+
+# 7. 查看备份日志
+journalctl -u tg-download-backup.service -f
+```
+
+默认配置是**每日凌晨 02:00** 执行备份，每个数据库最多保留 **3 份**最近的备份。
+
+### 从备份恢复
+
+```bash
+# 1. 进入备份目录
+cd backups
+
+# 2. 解压备份文件
+gunzip downloads_20260516_020000.db.gz
+
+# 3. 复制回项目根目录（先关闭服务！）
+sudo systemctl stop tg-download
+cp downloads_20260516_020000.db ../downloads.db
+
+# 4. 重启服务
+sudo systemctl start tg-download
+```
+
+---
+
+## 安全远程更新
+
+配置好远程服务器后，可以使用安全更新脚本进行部署：
+
+### 1. 配置远程服务器信息
+
+复制 `.env.example` 为 `.env` 并编辑：
+
+```bash
+cp .env.example .env
+# 编辑 .env，填入你的远程服务器信息
+```
+
+`.env` 文件内容：
+
+```env
+# 远程服务器配置
+REMOTE_HOST=root@your.remote.host
+REMOTE_PATH=/root/workspace/tg_download
+```
+
+### 2. 执行安全更新
+
+```bash
+./scripts/update_remote.sh
+```
+
+这个脚本的安全特性：
+- ✅ **不会覆盖** 数据库文件 (*.db)
+- ✅ **不会覆盖** 配置文件 (config.yaml, .env)
+- ✅ **不会覆盖** 下载和缩略图数据
+- ✅ 自动构建和同步前端
+- ✅ 安全重启服务
+
+### 3. 检查配置差异（可选）
+
+如果 `config.example.yaml` 有更新，可以使用配置检查工具查看差异：
+
+```bash
+# 检查本地配置
+python3 scripts/check_config_update.py --local
+
+# 检查远程配置
+python3 scripts/check_config_update.py --remote
+```
+
+### 4. 手动安全同步（不推荐）
+
+如果必须手动同步，**请务必使用**以下命令：
+
+```bash
+rsync -avz \
+  --exclude="*.db" \
+  --exclude="*.db-shm" \
+  --exclude="*.db-wal" \
+  --exclude="data/" \
+  --exclude="downloads/" \
+  --exclude="thumbnails/" \
+  --exclude="logs/" \
+  --exclude="venv/" \
+  --exclude=".venv/" \
+  --exclude="web/node_modules/" \
+  --exclude="__pycache__/" \
+  --exclude="*.pyc" \
+  --exclude=".pytest_cache/" \
+  --exclude="*.session" \
+  --exclude="*.session-journal" \
+  --exclude=".git/" \
+  --exclude=".trae/" \
+  --exclude="config.yaml" \
+  --exclude=".env" \
+  ./ root@your.remote.host:/root/workspace/tg_download/
+```
+
+---
+
 ## 使用方式
 
 ### Dashboard 监控面板
@@ -213,3 +352,5 @@ scp config.yaml user_session.session user@new_server:/path/to/tg_download/
 - `config.yaml`、`user_session.session`、`.env` 已在 `.gitignore` 中，不会被提交到 git
 - session 文件等同于登录凭证，请妥善保管
 - 建议使用环境变量传递敏感信息，而非明文写在配置文件中
+- **永远不要** 直接 rsync 所有文件，务必使用 `scripts/update_remote.sh`
+- **永远不要** 覆盖数据库文件或配置文件

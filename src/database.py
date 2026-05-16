@@ -1082,55 +1082,67 @@ class DownloadDB:
         with _db_lock:
             conn = self._get_connection()
             try:
-                # 获取第一层去重信息
-                level1 = self.get_dedupe_level1(task_id)
+                # 先获取该任务所有的去重结果
+                cursor = conn.execute(
+                    """
+                    SELECT dr.*, dm.file_id, dm.file_size, dm.duration, dm.thumbnail_path, 
+                           dm.thumbnail_width, dm.thumbnail_height, dm.phash,
+                           dm.first_seen_message_id, dm.first_seen_date
+                    FROM dedupe_results dr
+                    JOIN dedupe_media dm ON dr.task_id = dm.task_id AND dr.file_id = dm.file_id
+                    WHERE dr.task_id = ?
+                    ORDER BY dr.message_id
+                    """,
+                    (task_id,)
+                )
+                all_results = [dict(row) for row in cursor.fetchall()]
+                
+                # 第一层去重：按 file_id 分组
+                level1_groups = []
+                file_id_to_group: Dict[str, dict] = {}
+                
+                for result in all_results:
+                    file_id = result['file_id']
+                    if file_id not in file_id_to_group:
+                        # 创建新组
+                        group = {
+                            "group_id": file_id,
+                            "primary_file_id": file_id,
+                            "media_list": [],
+                            "primary_media_id": result['id'] if result.get('is_original') else None
+                        }
+                        level1_groups.append(group)
+                        file_id_to_group[file_id] = group
+                    
+                    # 添加 has_thumbnail 字段
+                    media = result.copy()
+                    media['has_thumbnail'] = bool(media.get('thumbnail_path'))
+                    file_id_to_group[file_id]['media_list'].append(media)
                 
                 # 获取第二层去重信息
                 level2 = self.get_dedupe_level2(task_id)
                 
-                # 构建详细的结果结构
-                level1_detail = {}
-                for g in level1:
-                    # 获取该组的所有媒体详情
-                    placeholders = ",".join(["?"] * len(g["media_ids"]))
-                    cursor = conn.execute(
-                        f"""
-                        SELECT id, file_id, file_size, duration, thumbnail_path,
-                               phash, first_seen_message_id, first_seen_date
-                        FROM dedupe_media
-                        WHERE id IN ({placeholders})
-                        """,
-                        g["media_ids"]
-                    )
-                    media_list = [dict(row) for row in cursor.fetchall()]
-                    level1_detail[g["group_id"]] = {
-                        "group_id": g["group_id"],
-                        "primary_media_id": g["primary_media_id"],
-                        "primary_file_id": g["primary_file_id"],
-                        "media_list": media_list
-                    }
-                
                 # 构建第二层结果详情
                 level2_detail = []
                 for g in level2:
-                    level1_groups = []
+                    level1_groups_in_level2 = []
                     for level1_group_id in g["level1_group_ids"]:
-                        if level1_group_id in level1_detail:
-                            level1_groups.append(level1_detail[level1_group_id])
+                        if level1_group_id in file_id_to_group:
+                            level1_groups_in_level2.append(file_id_to_group[level1_group_id])
                     level2_detail.append({
                         "group_id": g["group_id"],
                         "primary_level1_group_id": g["primary_level1_group_id"],
-                        "level1_groups": level1_groups,
+                        "level1_groups": level1_groups_in_level2,
                         "similarity_score": g["similarity_score"],
                         "hamming_distance": g["hamming_distance"]
                     })
                 
                 return {
                     "task_id": task_id,
-                    "level1_groups": level1,
-                    "level1_count": len(level1),
+                    "level1_groups": level1_groups,
+                    "level1_count": len(level1_groups),
                     "level2_groups": level2_detail,
-                    "level2_count": len(level2)
+                    "level2_count": len(level2_detail)
                 }
             finally:
                 conn.close()

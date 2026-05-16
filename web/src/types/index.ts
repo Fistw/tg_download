@@ -139,16 +139,6 @@ export interface TwoLevelDedupeSummary {
   level2_count: number;
 }
 
-export interface RunTwoLevelDedupeRequest {
-  similarity_threshold?: number;
-}
-
-export interface RunLevel1DedupeResponse {
-  success: boolean;
-  message: string;
-  level1_count: number;
-}
-
 export interface RunLevel2DedupeResponse {
   success: boolean;
   message: string;

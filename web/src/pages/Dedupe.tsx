@@ -46,9 +46,7 @@ import type {
   ChatInfo, 
   DedupeTask, 
   DedupeMedia, 
-  TwoLevelDedupeSummary,
-  DedupeLevel2Group,
-  DedupeLevel1Group
+  TwoLevelDedupeSummary
 } from '../types'
 
 function formatFileSize(bytes: number): string {
@@ -383,20 +381,6 @@ export default function Dedupe() {
       setLoadingDedupe(false);
     }
   }, [currentTask]);
-
-  const handleRunLevel1Dedupe = async () => {
-    if (!currentTask) return;
-    setLoadingDedupe(true);
-    try {
-      const response = await apiClient.runLevel1Dedupe(currentTask.id);
-      showNotification(response.message, 'success');
-      await fetchDedupeSummary();
-    } catch (err) {
-      showNotification('第一层去重失败', 'error');
-    } finally {
-      setLoadingDedupe(false);
-    }
-  };
 
   const handleRunLevel2Dedupe = async () => {
     if (!currentTask) return;
@@ -1008,29 +992,28 @@ export default function Dedupe() {
 
                 <Button
                   variant="outlined"
-                  onClick={handleRunLevel1Dedupe}
+                  onClick={() => {
+                    if (confirm(`确定要使用相似度阈值 ${similarityThreshold} 进行第二层去重吗？\n这将基于缩略图相似度查找相似的媒体。`)) {
+                      handleRunLevel2Dedupe();
+                    }
+                  }}
                   disabled={loadingDedupe}
                   sx={{ borderRadius: 2 }}
                 >
-                  第一层去重
-                </Button>
-
-                <Button
-                  variant="outlined"
-                  onClick={handleRunLevel2Dedupe}
-                  disabled={loadingDedupe}
-                  sx={{ borderRadius: 2 }}
-                >
-                  第二层去重
+                  {loadingDedupe ? '处理中...' : '第二层去重'}
                 </Button>
 
                 <Button
                   variant="contained"
-                  onClick={handleRunTwoLevelDedupe}
+                  onClick={() => {
+                    if (confirm(`确定要使用相似度阈值 ${similarityThreshold} 进行完整去重吗？\n这将：\n1. 为所有媒体计算感知哈希\n2. 基于 file_id 进行第一层去重\n3. 基于缩略图相似度进行第二层去重\n\n此过程可能需要一些时间。`)) {
+                      handleRunTwoLevelDedupe();
+                    }
+                  }}
                   disabled={loadingDedupe}
                   sx={{ borderRadius: 2 }}
                 >
-                  完整去重
+                  {loadingDedupe ? '处理中...' : '完整去重'}
                 </Button>
               </Box>
 
@@ -1067,7 +1050,7 @@ export default function Dedupe() {
                   <Divider sx={{ mb: 3 }} />
 
                   {/* 第二层去重结果展示 */}
-                  {dedupeSummary.level2_count > 0 ? (
+                  {dedupeSummary.level2_count > 0 && dedupeSummary.level2_groups ? (
                     <Box>
                       <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 2 }}>
                         相似媒体分组
@@ -1090,7 +1073,7 @@ export default function Dedupe() {
                                     分组 {level2Group.group_id}
                                   </Typography>
                                   <Chip
-                                    label={`${level2Group.level1_group_ids.length} 个相似组`}
+                                    label={`${(level2Group.level1_group_ids || []).length} 个相似组`}
                                     size="small"
                                     color="warning"
                                   />
@@ -1116,7 +1099,7 @@ export default function Dedupe() {
                             <AccordionDetails>
                               {/* 显示该第二层分组下的所有第一层分组 */}
                               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                {level2Group.level1_groups.map((level1Group) => (
+                                {(level2Group.level1_groups || []).map((level1Group) => (
                                   <Box
                                     key={level1Group.group_id}
                                     sx={{
@@ -1132,14 +1115,14 @@ export default function Dedupe() {
                                         子分组 {level1Group.group_id}
                                       </Typography>
                                       <Chip
-                                        label={`${level1Group.media_list.length} 个媒体`}
+                                        label={`${(level1Group.media_list || []).length} 个媒体`}
                                         size="small"
                                         color="success"
                                       />
                                     </Box>
                                     {/* 展示该第一层分组下的媒体缩略图 */}
                                     <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                                      {level1Group.media_list.map((media) => (
+                                      {(level1Group.media_list || []).map((media) => (
                                         <Box
                                           key={media.id}
                                           sx={{
@@ -1182,7 +1165,7 @@ export default function Dedupe() {
                     </Box>
                   ) : (
                     /* 如果没有第二层去重结果，只显示第一层结果 */
-                    dedupeSummary.level1_count > 0 && (
+                    dedupeSummary.level1_count > 0 && dedupeSummary.level1_groups && (
                       <Box>
                         <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 2 }}>
                           第一层去重结果
@@ -1204,13 +1187,13 @@ export default function Dedupe() {
                                   分组 {level1Group.group_id}
                                 </Typography>
                                 <Chip
-                                  label={`${level1Group.media_list.length} 个媒体`}
+                                  label={`${(level1Group.media_list || []).length} 个媒体`}
                                   size="small"
                                   color="primary"
                                 />
                               </Box>
                               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                                {level1Group.media_list.map((media) => (
+                                {(level1Group.media_list || []).map((media) => (
                                   <Box
                                     key={media.id}
                                     sx={{

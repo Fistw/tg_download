@@ -460,46 +460,6 @@ class Deduplicator:
         logger.info(f"任务 {task_id} 完成哈希计算，共 {count} 个媒体")
         return count
 
-    def run_level1_dedupe(self, task_id: int) -> int:
-        """
-        运行第一层去重（基于 file_id）
-        
-        Args:
-            task_id: 去重任务ID
-            
-        Returns:
-            第一层去重组数
-        """
-        logger.info(f"开始任务 {task_id} 第一层去重（基于 file_id）")
-        
-        # 清除旧结果
-        self._db.clear_dedupe_results(task_id)
-        
-        # 获取所有媒体
-        media_list, _ = self._db.get_dedupe_media_list(task_id, limit=10000)
-        
-        # 按 file_id 分组
-        file_id_groups: Dict[str, List[Dict]] = {}
-        for media in media_list:
-            file_id = media['file_id']
-            if file_id not in file_id_groups:
-                file_id_groups[file_id] = []
-            file_id_groups[file_id].append(media)
-        
-        # 创建第一层去重结果
-        group_count = 0
-        for file_id, group_media in file_id_groups.items():
-            # 选择最早出现的作为主媒体
-            primary_media = min(group_media, key=lambda m: m['first_seen_message_id'] or 0)
-            media_ids = [m['id'] for m in group_media]
-            
-            self._db.add_dedupe_level1(
-                task_id, file_id, primary_media['id'], media_ids)
-            group_count += 1
-        
-        logger.info(f"任务 {task_id} 第一层去重完成，共 {group_count} 组")
-        return group_count
-
     def run_level2_dedupe(
         self,
         task_id: int,
@@ -517,30 +477,32 @@ class Deduplicator:
         """
         logger.info(f"开始任务 {task_id} 第二层去重（基于图片相似度）")
         
+        # 首先确保所有媒体都计算了感知哈希
+        phash_count = self.compute_phashes_for_task(task_id)
+        logger.info(f"任务 {task_id} 已计算 {phash_count} 个感知哈希")
+        
         similarity = ImageSimilarity(
             similarity_threshold or ImageSimilarity.DEFAULT_SIMILARITY_THRESHOLD
         )
         
-        # 获取第一层去重结果
-        level1_groups = self._db.get_dedupe_level1(task_id)
+        # 先获取完整的两层去重汇总（包含第一层按 file_id 分组）
+        summary = self._db.get_two_level_dedupe_summary(task_id)
+        level1_groups = summary['level1_groups']
         
-        # 获取所有有 phash 的媒体
+        # 获取所有有 phash 的媒体（按 file_id 索引）
         media_with_phash = self._db.get_media_with_phash(task_id)
-        media_by_id = {m['id']: m for m in media_with_phash}
+        media_by_file_id = {m['file_id']: m for m in media_with_phash}
         
-        # 为每个 level1 组计算代表哈希
+        # 为每个 level1 组分配代表哈希
         group_phashes: Dict[str, Dict[str, Any]] = {}
         for group in level1_groups:
-            # 在组内找有 phash 的媒体
-            for media_id in group['media_ids']:
-                if media_id in media_by_id:
-                    media = media_by_id[media_id]
-                    if media.get('phash'):
-                        group_phashes[group['group_id']] = {
-                            'phash': media['phash'],
-                            'group': group
-                        }
-                        break
+            # 用组的 file_id 查找是否有 phash
+            group_file_id = group['group_id']
+            if group_file_id in media_by_file_id and media_by_file_id[group_file_id].get('phash'):
+                group_phashes[group_file_id] = {
+                    'phash': media_by_file_id[group_file_id]['phash'],
+                    'group_id': group_file_id
+                }
         
         # 对第一层组进行相似度分组
         used_groups = set()
@@ -591,7 +553,8 @@ class Deduplicator:
                     'hamming_distance': min_distance
                 })
         
-        # 保存第二层去重结果
+        # 清除旧的第二层结果并保存新的
+        self._db.clear_dedupe_results(task_id)
         for i, lg in enumerate(level2_groups):
             self._db.add_dedupe_level2(
                 task_id,
@@ -622,22 +585,20 @@ class Deduplicator:
         """
         logger.info(f"开始任务 {task_id} 完整两层去重流程")
         
-        # 1. 计算感知哈希
-        phash_count = self.compute_phashes_for_task(task_id)
-        
-        # 2. 第一层去重
-        level1_count = self.run_level1_dedupe(task_id)
-        
-        # 3. 第二层去重
+        # 第二层去重（第一层在 get_two_level_dedupe_summary 中动态计算）
+        # 注意：run_level2_dedupe 内部已经会先计算哈希
         level2_count = self.run_level2_dedupe(task_id, similarity_threshold)
         
         # 获取汇总结果
         summary = self._db.get_two_level_dedupe_summary(task_id)
         
+        # 统计已计算的哈希数量
+        media_with_phash = self._db.get_media_with_phash(task_id)
+        
         logger.info(
             f"任务 {task_id} 两层去重完成: "
-            f"{phash_count} 个哈希, "
-            f"{level1_count} 第一层组, "
+            f"{len(media_with_phash)} 个哈希, "
+            f"{summary['level1_count']} 第一层组, "
             f"{level2_count} 第二层组"
         )
         
