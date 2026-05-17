@@ -736,6 +736,7 @@ class DownloadDB:
                 total = total_row['total'] if total_row else 0
                 
                 # 获取数据（先获取媒体信息，然后批量查询 dedupe_results）
+                # 注意：不查询 phash 和 thumbnail_data 字段以避免大数据传输
                 data_query = """
                     SELECT 
                         m.id,
@@ -763,12 +764,13 @@ class DownloadDB:
                     file_ids.append(item['file_id'])
                 
                 # 批量查询 dedupe_results 获取 is_original 和 downloaded 信息
+                # 优化：使用 DISTINCT 避免重复的 file_id 记录
                 is_original_map = {}
                 downloaded_map = {}
                 if file_ids:
                     placeholders = ','.join(['?'] * len(file_ids))
                     results_query = """
-                        SELECT file_id, is_original, downloaded
+                        SELECT DISTINCT file_id, is_original, downloaded
                         FROM dedupe_results
                         WHERE task_id = ? AND file_id IN ({}) AND is_original = 1
                     """.format(placeholders)
@@ -1154,6 +1156,16 @@ class DownloadDB:
             try:
                 conn.execute("DELETE FROM dedupe_level1 WHERE task_id = ?", (task_id,))
                 conn.execute("DELETE FROM dedupe_level2 WHERE task_id = ?", (task_id,))
+                conn.commit()
+            finally:
+                conn.close()
+    
+    def clear_media_phash(self, task_id: int) -> None:
+        """清除任务所有媒体的感知哈希"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute("UPDATE dedupe_media SET phash = NULL WHERE task_id = ?", (task_id,))
                 conn.commit()
             finally:
                 conn.close()

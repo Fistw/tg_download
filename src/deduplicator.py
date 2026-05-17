@@ -416,17 +416,22 @@ class Deduplicator:
 
         return downloaded_count
 
-    def compute_phashes_for_task(self, task_id: int) -> int:
+    def compute_phashes_for_task(self, task_id: int, clear_existing: bool = True) -> int:
         """
         为任务中的所有媒体计算感知哈希
         
         Args:
             task_id: 去重任务ID
+            clear_existing: 是否清除已有的phash并重新计算
             
         Returns:
             成功计算哈希的媒体数量
         """
         logger.info(f"开始为任务 {task_id} 计算感知哈希")
+        
+        if clear_existing:
+            logger.info(f"清除任务 {task_id} 已有的感知哈希")
+            self._db.clear_media_phash(task_id)
         
         # 获取该任务的所有媒体
         media_list, _ = self._db.get_dedupe_media_list(task_id, limit=10000)
@@ -438,8 +443,8 @@ class Deduplicator:
             media_id = media['id']
             file_id = media['file_id']
             
-            # 如果已经有phash则跳过
-            if media.get('phash'):
+            # 如果已经有phash且不清除则跳过
+            if not clear_existing and media.get('phash'):
                 continue
                 
             # 尝试获取缩略图

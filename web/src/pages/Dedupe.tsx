@@ -747,6 +747,18 @@ export default function Dedupe() {
                               <img
                                 src={`/api/dedupe/tasks/${currentTask?.id}/media/${media.id}/thumbnail`}
                                 alt="缩略图"
+                                loading="lazy"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).style.display = 'none';
+                                  const parent = (e.target as HTMLImageElement).parentElement;
+                                  if (parent) {
+                                    const fallback = document.createElement('span');
+                                    fallback.style.color = 'grey.500';
+                                    fallback.style.fontSize = '20px';
+                                    fallback.textContent = '🎬';
+                                    parent.appendChild(fallback);
+                                  }
+                                }}
                                 style={{
                                   width: '100%',
                                   height: '100%',
@@ -810,6 +822,17 @@ export default function Dedupe() {
                   <img
                     src={`/api/dedupe/tasks/${currentTask?.id}/media/${hoveredMedia.id}/thumbnail`}
                     alt="预览"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = 'none';
+                      const parent = (e.target as HTMLImageElement).parentElement;
+                      if (parent) {
+                        const fallback = document.createElement('div');
+                        fallback.style.padding = '24px';
+                        fallback.style.textAlign = 'center';
+                        fallback.innerHTML = '<p style="margin:0;color:#666;">暂无预览</p>';
+                        parent.appendChild(fallback);
+                      }
+                    }}
                     style={{
                       maxWidth: '100%',
                       maxHeight: '400px',

@@ -20,3 +20,6 @@ data/
 backups/
 
 *_PRIVATE.md
+check_duplicates.py
+check_task.py
+check_results.py

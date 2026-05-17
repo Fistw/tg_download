@@ -16,10 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class ImageSimilarity:
-    """图像相似度计算类，基于感知哈希（dHash）"""
+    """图像相似度计算类，基于感知哈希（pHash）"""
     
-    # 默认阈值：汉明距离小于等于10认为是相似图片
-    DEFAULT_SIMILARITY_THRESHOLD = 10
+    # 默认阈值：汉明距离小于等于5认为是相似图片
+    DEFAULT_SIMILARITY_THRESHOLD = 5
     
     @staticmethod
     def _has_required_libs() -> bool:
@@ -42,7 +42,7 @@ class ImageSimilarity:
 
     def compute_hash(self, image_data: bytes) -> Optional[str]:
         """
-        计算图像的dHash（差异哈希）
+        计算图像的pHash（感知哈希）
 
         Args:
             image_data: 图像二进制数据
@@ -57,8 +57,8 @@ class ImageSimilarity:
             image = Image.open(io.BytesIO(image_data))
             # 转换为灰度图
             image = image.convert("L")
-            # 计算dHash
-            phash = imagehash.dhash(image)
+            # 计算pHash
+            phash = imagehash.phash(image)
             return str(phash)
         except Exception as e:
             logger.debug(f"Failed to compute image hash: {e}")
@@ -148,6 +148,6 @@ class ImageSimilarity:
             return 0.0
 
         distance = self.hamming_distance(hash1, hash2)
-        # dHash通常是64位（16个16进制字符），最大可能距离是64
+        # pHash通常是64位（16个16进制字符），最大可能距离是64
         max_distance = 64.0
         return max(0.0, 1.0 - (distance / max_distance))
