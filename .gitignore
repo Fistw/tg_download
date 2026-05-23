@@ -18,6 +18,8 @@ downloads.db
 .trae/
 data/
 backups/
+offline_data/
+offline_results/
 
 *_PRIVATE.md
 check_duplicates.py
