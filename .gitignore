@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 dist/
+node_modules/
 build/
 .eggs/
 *.session
@@ -18,10 +19,13 @@ downloads.db
 .trae/
 data/
 backups/
+scripts/thumbnails/
 offline_data/
 offline_results/
+thumbnails/
 
 *_PRIVATE.md
 check_duplicates.py
 check_task.py
 check_results.py
+check_db.py
