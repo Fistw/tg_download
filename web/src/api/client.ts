@@ -10,6 +10,7 @@ import type {
   CreateDedupeTaskRequest,
   DownloadMediaRequest,
   TwoLevelDedupeSummary,
+  DedupeLevel2Group,
   RunLevel2DedupeResponse,
   RunTwoLevelDedupeResponse,
 } from '../types';
@@ -150,8 +151,35 @@ export const apiClient = {
     return response.data;
   },
 
-  async getTwoLevelDedupeSummary(taskId: number): Promise<TwoLevelDedupeSummary> {
-    const response = await api.get(`/dedupe/tasks/${taskId}/dedupe/summary`);
+  async getTwoLevelDedupeSummary(
+    taskId: number,
+    params?: {
+      level2_page?: number;
+      level2_limit?: number;
+      download_status?: string;
+      show_uninterested?: boolean;
+    }
+  ): Promise<TwoLevelDedupeSummary> {
+    const response = await api.get(`/dedupe/tasks/${taskId}/dedupe/summary`, { params });
+    return response.data;
+  },
+
+  async setLevel2GroupInterest(
+    taskId: number,
+    groupId: string,
+    uninterested: boolean
+  ): Promise<{ success: boolean; group_id: string; uninterested: boolean }> {
+    const response = await api.post(
+      `/dedupe/tasks/${taskId}/dedupe/level2/${encodeURIComponent(groupId)}/interest`,
+      { uninterested }
+    );
+    return response.data;
+  },
+
+  async getLevel2GroupDetail(taskId: number, groupId: string): Promise<DedupeLevel2Group> {
+    const response = await api.get(
+      `/dedupe/tasks/${taskId}/dedupe/level2/${encodeURIComponent(groupId)}`
+    );
     return response.data;
   },
 };

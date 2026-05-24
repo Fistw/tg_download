@@ -463,3 +463,84 @@ class TestDedupeResult:
             assert result_id >= 1
         finally:
             db.close()
+
+
+class TestMediaPhash:
+    """测试媒体感知哈希相关功能"""
+    
+    def test_update_media_phash(self, tmp_path):
+        """测试更新媒体的 phash"""
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            db.add_dedupe_media(task_id, file_id="test_file")
+            
+            # 更新 phash
+            db.update_media_phash(task_id, "test_file", "abcdef123456")
+            
+            # 验证
+            media = db.get_dedupe_media(task_id, "test_file")
+            assert media["phash"] == "abcdef123456"
+        finally:
+            db.close()
+    
+    def test_clear_media_phash(self, tmp_path):
+        """测试清除媒体的 phash"""
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            
+            # 添加多个带 phash 的媒体
+            db.add_dedupe_media(task_id, file_id="file1", phash="hash1")
+            db.add_dedupe_media(task_id, file_id="file2", phash="hash2")
+            db.add_dedupe_media(task_id, file_id="file3", phash="hash3")
+            
+            # 先验证 phash 存在
+            media1 = db.get_dedupe_media(task_id, "file1")
+            media2 = db.get_dedupe_media(task_id, "file2")
+            assert media1["phash"] == "hash1"
+            assert media2["phash"] == "hash2"
+            
+            # 清除 phash
+            db.clear_media_phash(task_id)
+            
+            # 验证 phash 已清除
+            media1 = db.get_dedupe_media(task_id, "file1")
+            media2 = db.get_dedupe_media(task_id, "file2")
+            media3 = db.get_dedupe_media(task_id, "file3")
+            assert media1["phash"] is None
+            assert media2["phash"] is None
+            assert media3["phash"] is None
+        finally:
+            db.close()
+    
+    def test_clear_media_phash_no_media(self, tmp_path):
+        """测试在没有媒体的情况下清除 phash (不应该报错)"""
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            
+            # 即使没有媒体也应该能正常执行
+            db.clear_media_phash(task_id)
+        finally:
+            db.close()
+    
+    def test_get_media_with_phash(self, tmp_path):
+        """测试获取有 phash 的媒体"""
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            task_id = db.create_dedupe_task(chat_id=12345)
+            
+            # 部分有 phash，部分没有
+            db.add_dedupe_media(task_id, file_id="file1", phash="hash1")
+            db.add_dedupe_media(task_id, file_id="file2", phash="hash2")
+            db.add_dedupe_media(task_id, file_id="file3")
+            
+            media_with_phash = db.get_media_with_phash(task_id)
+            assert len(media_with_phash) == 2
+            file_ids = {m["file_id"] for m in media_with_phash}
+            assert "file1" in file_ids
+            assert "file2" in file_ids
+            assert "file3" not in file_ids
+        finally:
+            db.close()

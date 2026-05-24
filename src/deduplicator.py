@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -32,6 +33,19 @@ class Deduplicator:
         self._flood_coordinator = flood_coordinator or get_flood_coordinator()
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # 默认不暂停
+        self._download_statuses: Dict[int, Dict[str, str]] = {}
+        self._download_status_lock = threading.RLock()
+
+    def set_download_status(self, task_id: int, file_id: str, status: str) -> None:
+        """记录指定媒体当前下载状态。"""
+        with self._download_status_lock:
+            task_statuses = self._download_statuses.setdefault(task_id, {})
+            task_statuses[file_id] = status
+
+    def get_download_status_map(self, task_id: int) -> Dict[str, str]:
+        """获取任务下所有已知下载状态。"""
+        with self._download_status_lock:
+            return dict(self._download_statuses.get(task_id, {}))
 
     def create_task(
         self,
@@ -380,9 +394,9 @@ class Deduplicator:
 
         # 获取要下载的媒体列表
         if download_all:
-            media_list = self._db.get_dedupe_media_list(task_id, filter_type="singles")
+            media_list, _ = self._db.get_dedupe_media_list(task_id, filter_type="singles")
             # 同时获取重复文件的第一个出现
-            duplicates = self._db.get_dedupe_media_list(task_id, filter_type="duplicates")
+            duplicates, _ = self._db.get_dedupe_media_list(task_id, filter_type="duplicates")
             media_list.extend(duplicates)
         elif file_id:
             media = self._db.get_dedupe_media(task_id, file_id)
@@ -393,11 +407,17 @@ class Deduplicator:
         downloaded_count = 0
 
         for media in media_list:
+            if media is not None:
+                self.set_download_status(task_id, media["file_id"], "queued")
+
+        for media in media_list:
             if media is None:
                 continue
 
             message_id = media["first_seen_message_id"]
+            current_file_id = media["file_id"]
             try:
+                self.set_download_status(task_id, current_file_id, "downloading")
                 message = await self._client.get_messages(chat_id, ids=message_id)
                 if message and _is_video(message):
                     await self._flood_coordinator.wait_if_needed()
@@ -409,24 +429,36 @@ class Deduplicator:
                     )
                     if result:
                         downloaded_count += 1
+                        self._db.mark_dedupe_result_downloaded(task_id, current_file_id, True)
+                        self.set_download_status(task_id, current_file_id, "downloaded")
                         logger.info("已下载: %s", result)
+                    else:
+                        self.set_download_status(task_id, current_file_id, "failed")
+                else:
+                    self.set_download_status(task_id, current_file_id, "failed")
             except Exception as e:
+                self.set_download_status(task_id, current_file_id, "failed")
                 logger.error("下载消息 %d 失败: %s", message_id, e)
                 continue
 
         return downloaded_count
 
-    def compute_phashes_for_task(self, task_id: int) -> int:
+    def compute_phashes_for_task(self, task_id: int, clear_existing: bool = True) -> int:
         """
         为任务中的所有媒体计算感知哈希
         
         Args:
             task_id: 去重任务ID
+            clear_existing: 是否清除已有的phash并重新计算
             
         Returns:
             成功计算哈希的媒体数量
         """
         logger.info(f"开始为任务 {task_id} 计算感知哈希")
+        
+        if clear_existing:
+            logger.info(f"清除任务 {task_id} 已有的感知哈希")
+            self._db.clear_media_phash(task_id)
         
         # 获取该任务的所有媒体
         media_list, _ = self._db.get_dedupe_media_list(task_id, limit=10000)
@@ -438,8 +470,8 @@ class Deduplicator:
             media_id = media['id']
             file_id = media['file_id']
             
-            # 如果已经有phash则跳过
-            if media.get('phash'):
+            # 如果已经有phash且不清除则跳过
+            if not clear_existing and media.get('phash'):
                 continue
                 
             # 尝试获取缩略图
@@ -485,22 +517,16 @@ class Deduplicator:
             similarity_threshold or ImageSimilarity.DEFAULT_SIMILARITY_THRESHOLD
         )
         
-        # 先获取完整的两层去重汇总（包含第一层按 file_id 分组）
-        summary = self._db.get_two_level_dedupe_summary(task_id)
-        level1_groups = summary['level1_groups']
-        
         # 获取所有有 phash 的媒体（按 file_id 索引）
         media_with_phash = self._db.get_media_with_phash(task_id)
         media_by_file_id = {m['file_id']: m for m in media_with_phash}
         
         # 为每个 level1 组分配代表哈希
         group_phashes: Dict[str, Dict[str, Any]] = {}
-        for group in level1_groups:
-            # 用组的 file_id 查找是否有 phash
-            group_file_id = group['group_id']
-            if group_file_id in media_by_file_id and media_by_file_id[group_file_id].get('phash'):
+        for group_file_id, media in media_by_file_id.items():
+            if media.get('phash'):
                 group_phashes[group_file_id] = {
-                    'phash': media_by_file_id[group_file_id]['phash'],
+                    'phash': media['phash'],
                     'group_id': group_file_id
                 }
         
@@ -589,9 +615,12 @@ class Deduplicator:
         # 注意：run_level2_dedupe 内部已经会先计算哈希
         level2_count = self.run_level2_dedupe(task_id, similarity_threshold)
         
-        # 获取汇总结果
-        summary = self._db.get_two_level_dedupe_summary(task_id)
-        
+        # 获取轻量汇总结果，避免大任务生成超大响应对象。
+        summary = self._db.get_two_level_dedupe_summary_page(
+            task_id,
+            runtime_status_map=self.get_download_status_map(task_id),
+        )
+
         # 统计已计算的哈希数量
         media_with_phash = self._db.get_media_with_phash(task_id)
         

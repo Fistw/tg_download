@@ -46,6 +46,7 @@ import type {
   ChatInfo, 
   DedupeTask, 
   DedupeMedia, 
+  DedupeLevel2Group,
   TwoLevelDedupeSummary
 } from '../types'
 
@@ -132,6 +133,13 @@ export default function Dedupe() {
   const [loadingDedupe, setLoadingDedupe] = useState(false)
   const [similarityThreshold, setSimilarityThreshold] = useState<string>('10')
   const [expandedLevel2Group, setExpandedLevel2Group] = useState<string | null>(null)
+  const [level2GroupDetails, setLevel2GroupDetails] = useState<Record<string, DedupeLevel2Group>>({})
+  const [loadingLevel2GroupId, setLoadingLevel2GroupId] = useState<string | null>(null)
+  const [level2Page, setLevel2Page] = useState(1)
+  const [level2PageInputValue, setLevel2PageInputValue] = useState<string>('1')
+  const [level2DownloadStatusFilter, setLevel2DownloadStatusFilter] = useState<string>('all')
+  const [showUninterestedLevel2Groups, setShowUninterestedLevel2Groups] = useState(false)
+  const level2Limit = 50
   
   // 鼠标悬浮显示预览
   const handleMediaMouseEnter = (media: DedupeMedia, event: React.MouseEvent) => {
@@ -162,6 +170,38 @@ export default function Dedupe() {
 
   const showNotification = (message: string, type: 'success' | 'error') => {
     setNotification({ message, type })
+  }
+
+  const getLevel2DownloadStatusColor = (
+    status?: string
+  ): 'default' | 'primary' | 'secondary' | 'error' | 'info' | 'success' | 'warning' => {
+    switch (status) {
+      case 'queued':
+        return 'warning'
+      case 'downloading':
+        return 'info'
+      case 'downloaded':
+        return 'success'
+      case 'failed':
+        return 'error'
+      default:
+        return 'default'
+    }
+  }
+
+  const getLevel2DownloadStatusLabel = (status?: string): string => {
+    switch (status) {
+      case 'queued':
+        return '排队中'
+      case 'downloading':
+        return '下载中'
+      case 'downloaded':
+        return '已下载'
+      case 'failed':
+        return '失败'
+      default:
+        return '未下载'
+    }
   }
 
   const fetchChats = useCallback(async () => {
@@ -368,19 +408,28 @@ export default function Dedupe() {
   }
 
   // 两层去重相关函数
-  const fetchDedupeSummary = useCallback(async () => {
+  const fetchDedupeSummary = useCallback(async (pageNum: number = 1) => {
     if (!currentTask) return;
     setLoadingDedupe(true);
     try {
-      const summary = await apiClient.getTwoLevelDedupeSummary(currentTask.id);
+      const summary = await apiClient.getTwoLevelDedupeSummary(currentTask.id, {
+        level2_page: pageNum,
+        level2_limit: level2Limit,
+        download_status: level2DownloadStatusFilter,
+        show_uninterested: showUninterestedLevel2Groups,
+      });
       setDedupeSummary(summary);
+      setLevel2GroupDetails({})
+      setLevel2Page(summary.level2_pagination?.page || pageNum);
+      setLevel2PageInputValue(String(summary.level2_pagination?.page || pageNum));
+      setExpandedLevel2Group(null);
     } catch (err) {
       console.error('获取去重汇总失败:', err);
       setDedupeSummary(null);
     } finally {
       setLoadingDedupe(false);
     }
-  }, [currentTask]);
+  }, [currentTask, level2DownloadStatusFilter, showUninterestedLevel2Groups]);
 
   const handleRunLevel2Dedupe = async () => {
     if (!currentTask) return;
@@ -389,7 +438,7 @@ export default function Dedupe() {
       const threshold = parseInt(similarityThreshold);
       const response = await apiClient.runLevel2Dedupe(currentTask.id, threshold);
       showNotification(response.message, 'success');
-      await fetchDedupeSummary();
+      await fetchDedupeSummary(1);
     } catch (err) {
       showNotification('第二层去重失败', 'error');
     } finally {
@@ -405,6 +454,10 @@ export default function Dedupe() {
       const response = await apiClient.runTwoLevelDedupe(currentTask.id, threshold);
       showNotification(response.message, 'success');
       setDedupeSummary(response.summary);
+      setLevel2GroupDetails({})
+      setLevel2Page(response.summary.level2_pagination?.page || 1);
+      setLevel2PageInputValue(String(response.summary.level2_pagination?.page || 1));
+      setExpandedLevel2Group(null);
     } catch (err) {
       showNotification('完整两层去重失败', 'error');
     } finally {
@@ -412,18 +465,64 @@ export default function Dedupe() {
     }
   };
 
-  const handleToggleLevel2Group = (groupId: string) => {
-    if (expandedLevel2Group === groupId) {
-      setExpandedLevel2Group(null);
-    } else {
-      setExpandedLevel2Group(groupId);
+  const handleDownloadLevel2Group = async (fileId?: string | null) => {
+    if (!currentTask || !fileId) return;
+    try {
+      const result = await apiClient.downloadMedia(currentTask.id, {
+        file_id: fileId,
+        download_all: false,
+      });
+      showNotification(`已加入下载队列 ${result.downloaded_count} 个文件`, 'success');
+      await fetchDedupeSummary(level2Page);
+    } catch (err) {
+      showNotification('加入下载失败', 'error');
     }
-  };
+  }
+
+  const handleSetLevel2GroupInterest = async (groupId: string, uninterested: boolean) => {
+    if (!currentTask) return
+    try {
+      await apiClient.setLevel2GroupInterest(currentTask.id, groupId, uninterested)
+      showNotification(uninterested ? '已标记为不感兴趣' : '已取消不感兴趣', 'success')
+      await fetchDedupeSummary(level2Page)
+    } catch (err) {
+      showNotification(uninterested ? '设置不感兴趣失败' : '取消不感兴趣失败', 'error')
+    }
+  }
+
+  const handleToggleLevel2Group = async (groupId: string) => {
+    if (expandedLevel2Group === groupId) {
+      setExpandedLevel2Group(null)
+      return
+    }
+
+    setExpandedLevel2Group(groupId)
+    const summaryGroup = dedupeSummary?.level2_groups?.find((group) => group.group_id === groupId)
+    if ((summaryGroup?.level1_groups?.length || 0) > 0) {
+      return
+    }
+    if (level2GroupDetails[groupId]) {
+      return
+    }
+
+    try {
+      setLoadingLevel2GroupId(groupId)
+      const detail = await apiClient.getLevel2GroupDetail(currentTask!.id, groupId)
+      setLevel2GroupDetails((prev) => ({
+        ...prev,
+        [groupId]: detail,
+      }))
+    } catch (err) {
+      showNotification('加载分组详情失败', 'error')
+    } finally {
+      setLoadingLevel2GroupId((current) => (current === groupId ? null : current))
+    }
+  }
 
   // 当当前任务变化时，获取去重汇总
   useEffect(() => {
     if (currentTask) {
-      fetchDedupeSummary();
+      fetchDedupeSummary(1);
     } else {
       setDedupeSummary(null);
     }
@@ -747,6 +846,18 @@ export default function Dedupe() {
                               <img
                                 src={`/api/dedupe/tasks/${currentTask?.id}/media/${media.id}/thumbnail`}
                                 alt="缩略图"
+                                loading="lazy"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).style.display = 'none';
+                                  const parent = (e.target as HTMLImageElement).parentElement;
+                                  if (parent) {
+                                    const fallback = document.createElement('span');
+                                    fallback.style.color = 'grey.500';
+                                    fallback.style.fontSize = '20px';
+                                    fallback.textContent = '🎬';
+                                    parent.appendChild(fallback);
+                                  }
+                                }}
                                 style={{
                                   width: '100%',
                                   height: '100%',
@@ -810,6 +921,17 @@ export default function Dedupe() {
                   <img
                     src={`/api/dedupe/tasks/${currentTask?.id}/media/${hoveredMedia.id}/thumbnail`}
                     alt="预览"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = 'none';
+                      const parent = (e.target as HTMLImageElement).parentElement;
+                      if (parent) {
+                        const fallback = document.createElement('div');
+                        fallback.style.padding = '24px';
+                        fallback.style.textAlign = 'center';
+                        fallback.innerHTML = '<p style="margin:0;color:#666;">暂无预览</p>';
+                        parent.appendChild(fallback);
+                      }
+                    }}
                     style={{
                       maxWidth: '100%',
                       maxHeight: '400px',
@@ -965,7 +1087,7 @@ export default function Dedupe() {
                 <Button
                   variant="outlined"
                   startIcon={<RefreshIcon />}
-                  onClick={fetchDedupeSummary}
+                  onClick={() => fetchDedupeSummary(level2Page)}
                   disabled={loadingDedupe}
                   sx={{ borderRadius: 2 }}
                 >
@@ -987,6 +1109,36 @@ export default function Dedupe() {
                     <MenuItem value="10">10（默认）</MenuItem>
                     <MenuItem value="15">15（宽松）</MenuItem>
                     <MenuItem value="20">20（非常宽松）</MenuItem>
+                  </Select>
+                </FormControl>
+
+                <FormControl sx={{ minWidth: 140 }}>
+                  <InputLabel size="small">下载状态</InputLabel>
+                  <Select
+                    value={level2DownloadStatusFilter}
+                    label="下载状态"
+                    size="small"
+                    onChange={(e) => setLevel2DownloadStatusFilter(e.target.value as string)}
+                  >
+                    <MenuItem value="all">全部</MenuItem>
+                    <MenuItem value="not_downloaded">未下载</MenuItem>
+                    <MenuItem value="queued">排队中</MenuItem>
+                    <MenuItem value="downloading">下载中</MenuItem>
+                    <MenuItem value="downloaded">已下载</MenuItem>
+                    <MenuItem value="failed">失败</MenuItem>
+                  </Select>
+                </FormControl>
+
+                <FormControl sx={{ minWidth: 160 }}>
+                  <InputLabel size="small">不感兴趣</InputLabel>
+                  <Select
+                    value={showUninterestedLevel2Groups ? 'show' : 'hide'}
+                    label="不感兴趣"
+                    size="small"
+                    onChange={(e) => setShowUninterestedLevel2Groups(e.target.value === 'show')}
+                  >
+                    <MenuItem value="hide">默认隐藏</MenuItem>
+                    <MenuItem value="show">展示不感兴趣</MenuItem>
                   </Select>
                 </FormControl>
 
@@ -1056,7 +1208,10 @@ export default function Dedupe() {
                         相似媒体分组
                       </Typography>
                       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        {dedupeSummary.level2_groups.map((level2Group) => (
+                        {dedupeSummary.level2_groups.map((level2Group) => {
+                          const detailGroup = level2GroupDetails[level2Group.group_id]
+                          const expandedGroup = detailGroup || level2Group
+                          return (
                           <Accordion
                             key={level2Group.group_id}
                             expanded={expandedLevel2Group === level2Group.group_id}
@@ -1067,39 +1222,142 @@ export default function Dedupe() {
                               expandIcon={<ExpandMoreIcon />}
                               sx={{ borderRadius: 2 }}
                             >
-                              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, flex: 1 }}>
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                    分组 {level2Group.group_id}
-                                  </Typography>
-                                  <Chip
-                                    label={`${(level2Group.level1_group_ids || []).length} 个相似组`}
-                                    size="small"
-                                    color="warning"
-                                  />
-                                  {level2Group.similarity_score && (
-                                    <Chip
-                                      label={`相似度: ${(level2Group.similarity_score * 100).toFixed(0)}%`}
-                                      size="small"
-                                      color="primary"
-                                      variant="outlined"
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flex: 1, minWidth: 0 }}>
+                                <Box
+                                  sx={{
+                                    width: 80,
+                                    height: 45,
+                                    bgcolor: 'grey.100',
+                                    borderRadius: 1,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    overflow: 'hidden',
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {level2Group.download_target_has_thumbnail && level2Group.download_target_media_id ? (
+                                    <img
+                                      src={`/api/dedupe/tasks/${currentTask?.id}/media/${level2Group.download_target_media_id}/thumbnail`}
+                                      alt="分组预览"
+                                      style={{
+                                        width: '100%',
+                                        height: '100%',
+                                        objectFit: 'cover',
+                                      }}
                                     />
-                                  )}
-                                  {level2Group.hamming_distance !== undefined && (
-                                    <Chip
-                                      label={`汉明距离: ${level2Group.hamming_distance}`}
-                                      size="small"
-                                      color="info"
-                                      variant="outlined"
-                                    />
+                                  ) : (
+                                    <span style={{ color: 'grey.500', fontSize: 14 }}>🎬</span>
                                   )}
                                 </Box>
+                                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, flex: 1, minWidth: 0 }}>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                      分组 {level2Group.group_id}
+                                    </Typography>
+                                    <Chip
+                                      label={`${(level2Group.level1_group_ids || []).length} 个相似组`}
+                                      size="small"
+                                      color="warning"
+                                    />
+                                    {level2Group.similarity_score && (
+                                      <Chip
+                                        label={`相似度: ${(level2Group.similarity_score * 100).toFixed(0)}%`}
+                                        size="small"
+                                        color="primary"
+                                        variant="outlined"
+                                      />
+                                    )}
+                                    {level2Group.hamming_distance !== undefined && (
+                                      <Chip
+                                        label={`汉明距离: ${level2Group.hamming_distance}`}
+                                        size="small"
+                                        color="info"
+                                        variant="outlined"
+                                      />
+                                    )}
+                                    <Chip
+                                      label={getLevel2DownloadStatusLabel(level2Group.download_status)}
+                                      size="small"
+                                      color={getLevel2DownloadStatusColor(level2Group.download_status)}
+                                    />
+                                    {level2Group.uninterested && (
+                                      <Chip
+                                        label="不感兴趣"
+                                        size="small"
+                                        variant="outlined"
+                                      />
+                                    )}
+                                    {level2Group.download_target_file_size ? (
+                                      <Chip
+                                        label={`最大文件 ${formatFileSize(level2Group.download_target_file_size)}`}
+                                        size="small"
+                                        variant="outlined"
+                                      />
+                                    ) : null}
+                                  </Box>
+                                </Box>
                               </Box>
+                              <Button
+                                variant="contained"
+                                size="small"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  handleDownloadLevel2Group(level2Group.download_target_file_id)
+                                }}
+                                disabled={
+                                  !level2Group.download_target_file_id ||
+                                  level2Group.download_status === 'queued' ||
+                                  level2Group.download_status === 'downloading' ||
+                                  level2Group.download_status === 'downloaded'
+                                }
+                                sx={{ borderRadius: 2, mr: 1 }}
+                              >
+                                {level2Group.download_status === 'downloaded'
+                                  ? '已下载'
+                                  : level2Group.download_status === 'downloading'
+                                    ? '下载中'
+                                    : level2Group.download_status === 'queued'
+                                      ? '排队中'
+                                      : '下载最大文件'}
+                              </Button>
+                              {!level2Group.uninterested && (
+                                <Button
+                                  variant="outlined"
+                                  color="inherit"
+                                  size="small"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    handleSetLevel2GroupInterest(level2Group.group_id, true)
+                                  }}
+                                  sx={{ borderRadius: 2, mr: 1 }}
+                                >
+                                  不感兴趣
+                                </Button>
+                              )}
+                              {level2Group.uninterested && (
+                                <Button
+                                  variant="outlined"
+                                  color="inherit"
+                                  size="small"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    handleSetLevel2GroupInterest(level2Group.group_id, false)
+                                  }}
+                                  sx={{ borderRadius: 2, mr: 1 }}
+                                >
+                                  取消不感兴趣
+                                </Button>
+                              )}
                             </AccordionSummary>
                             <AccordionDetails>
-                              {/* 显示该第二层分组下的所有第一层分组 */}
+                              {loadingLevel2GroupId === level2Group.group_id && !detailGroup ? (
+                                <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
+                                  <CircularProgress size={24} />
+                                </Box>
+                              ) : (
                               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                {(level2Group.level1_groups || []).map((level1Group) => (
+                                {(expandedGroup.level1_groups || []).map((level1Group) => (
                                   <Box
                                     key={level1Group.group_id}
                                     sx={{
@@ -1158,10 +1416,84 @@ export default function Dedupe() {
                                   </Box>
                                 ))}
                               </Box>
+                              )}
                             </AccordionDetails>
                           </Accordion>
-                        ))}
+                        )})}
                       </Box>
+                      {dedupeSummary.level2_pagination && dedupeSummary.level2_pagination.total_pages > 1 && (
+                        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, mt: 3, flexWrap: 'wrap' }}>
+                          <Button
+                            variant="outlined"
+                            disabled={level2Page <= 1 || loadingDedupe}
+                            onClick={() => fetchDedupeSummary(level2Page - 1)}
+                            sx={{ borderRadius: 2 }}
+                          >
+                            上一页
+                          </Button>
+                          <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                            第 {level2Page} / {dedupeSummary.level2_pagination.total_pages} 页，
+                            共 {dedupeSummary.level2_pagination.total} 个分组
+                          </Typography>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                              跳转到
+                            </Typography>
+                            <Box
+                              component="input"
+                              type="number"
+                              min={1}
+                              max={dedupeSummary.level2_pagination.total_pages}
+                              value={level2PageInputValue}
+                              onChange={(e) => {
+                                setLevel2PageInputValue((e.target as HTMLInputElement).value)
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const newPage = parseInt(level2PageInputValue) || 1
+                                  if (newPage >= 1 && newPage <= dedupeSummary.level2_pagination!.total_pages) {
+                                    fetchDedupeSummary(newPage)
+                                  } else {
+                                    setLevel2PageInputValue(level2Page.toString())
+                                  }
+                                }
+                              }}
+                              onBlur={() => {
+                                const newPage = parseInt(level2PageInputValue) || 1
+                                if (newPage >= 1 && newPage <= dedupeSummary.level2_pagination!.total_pages) {
+                                  fetchDedupeSummary(newPage)
+                                } else {
+                                  setLevel2PageInputValue(level2Page.toString())
+                                }
+                              }}
+                              sx={{
+                                width: '70px',
+                                padding: '6px 8px',
+                                borderRadius: '4px',
+                                border: '1px solid #ccc',
+                                fontSize: '14px',
+                                textAlign: 'center',
+                                '&:focus': {
+                                  outline: 'none',
+                                  borderColor: '#1976d2',
+                                  boxShadow: '0 0 0 2px rgba(25, 118, 210, 0.25)',
+                                }
+                              }}
+                            />
+                            <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                              页
+                            </Typography>
+                          </Box>
+                          <Button
+                            variant="outlined"
+                            disabled={level2Page >= dedupeSummary.level2_pagination.total_pages || loadingDedupe}
+                            onClick={() => fetchDedupeSummary(level2Page + 1)}
+                            sx={{ borderRadius: 2 }}
+                          >
+                            下一页
+                          </Button>
+                        </Box>
+                      )}
                     </Box>
                   ) : (
                     /* 如果没有第二层去重结果，只显示第一层结果 */

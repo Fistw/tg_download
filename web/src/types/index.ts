@@ -126,9 +126,16 @@ export interface DedupeLevel2Group {
   group_id: string;
   primary_level1_group_id: string;
   level1_group_ids: string[];
-  level1_groups: DedupeLevel1Group[];
+  level1_groups?: DedupeLevel1Group[];
   similarity_score?: number;
   hamming_distance?: number;
+  download_status?: 'not_downloaded' | 'queued' | 'downloading' | 'downloaded' | 'failed';
+  download_target_file_id?: string | null;
+  download_target_media_id?: number | null;
+  download_target_file_size?: number | null;
+  download_target_duration?: number | null;
+  download_target_has_thumbnail?: boolean;
+  uninterested?: boolean;
 }
 
 export interface TwoLevelDedupeSummary {
@@ -137,6 +144,14 @@ export interface TwoLevelDedupeSummary {
   level1_count: number;
   level2_groups: DedupeLevel2Group[];
   level2_count: number;
+  level2_pagination?: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
+  download_status_filter?: string;
+  show_uninterested?: boolean;
 }
 
 export interface RunLevel2DedupeResponse {
