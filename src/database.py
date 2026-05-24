@@ -234,11 +234,17 @@ class DownloadDB:
                 level1_group_ids TEXT NOT NULL,
                 similarity_score REAL,
                 hamming_distance INTEGER,
+                uninterested INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(task_id, group_id)
             )
             """
         )
+
+        cursor = conn.execute("PRAGMA table_info(dedupe_level2)")
+        dedupe_level2_columns = {row[1] for row in cursor.fetchall()}
+        if "uninterested" not in dedupe_level2_columns:
+            conn.execute("ALTER TABLE dedupe_level2 ADD COLUMN uninterested INTEGER DEFAULT 0")
         
         # 创建索引以提升查询性能
         self._create_indexes(conn)
@@ -267,6 +273,14 @@ class DownloadDB:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_dedupe_results_task_id 
             ON dedupe_results(task_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_results_task_downloaded_file
+            ON dedupe_results(task_id, downloaded, file_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_level2_task_interest_id
+            ON dedupe_level2(task_id, uninterested, id)
         """)
         
         logger.info("数据库索引创建完成")
@@ -814,6 +828,23 @@ class DownloadDB:
             finally:
                 conn.close()
 
+    def mark_dedupe_result_downloaded(self, task_id: int, file_id: str, downloaded: bool = True) -> None:
+        """更新去重结果的下载状态。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    UPDATE dedupe_results
+                    SET downloaded = ?
+                    WHERE task_id = ? AND file_id = ?
+                    """,
+                    (int(downloaded), task_id, file_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
     def batch_add_dedupe_media(self, media_list: list) -> None:
         """批量添加去重媒体记录，提升性能。"""
         if not media_list:
@@ -1046,14 +1077,34 @@ class DownloadDB:
                     """
                     INSERT OR REPLACE INTO dedupe_level2
                     (task_id, group_id, primary_level1_group_id, level1_group_ids,
-                     similarity_score, hamming_distance)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                     similarity_score, hamming_distance, uninterested)
+                    VALUES (?, ?, ?, ?, ?, ?, COALESCE(
+                        (SELECT uninterested FROM dedupe_level2 WHERE task_id = ? AND group_id = ?),
+                        0
+                    ))
                     """,
                     (task_id, group_id, primary_level1_group_id, level1_group_ids_str,
-                     similarity_score, hamming_distance)
+                     similarity_score, hamming_distance, task_id, group_id)
                 )
                 conn.commit()
                 return cursor.lastrowid
+            finally:
+                conn.close()
+
+    def set_dedupe_level2_uninterested(self, task_id: int, group_id: str, uninterested: bool = True) -> None:
+        """设置第二层分组是否不感兴趣。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    UPDATE dedupe_level2
+                    SET uninterested = ?
+                    WHERE task_id = ? AND group_id = ?
+                    """,
+                    (int(uninterested), task_id, group_id),
+                )
+                conn.commit()
             finally:
                 conn.close()
 
@@ -1076,6 +1127,400 @@ class DownloadDB:
                     row_dict["level1_group_ids"] = row_dict["level1_group_ids"].split(",")
                     results.append(row_dict)
                 return results
+            finally:
+                conn.close()
+
+    def get_two_level_dedupe_summary_page(
+        self,
+        task_id: int,
+        level2_page: int = 1,
+        level2_limit: int = 50,
+        level1_preview_limit: int = 10,
+        download_status_filter: Optional[str] = None,
+        runtime_status_map: Optional[Dict[str, str]] = None,
+        show_uninterested: bool = False,
+        include_level1_groups: bool = False,
+    ) -> Dict[str, Any]:
+        """获取分页后的两层去重汇总，避免一次性返回超大结果。"""
+        level2_page = max(1, int(level2_page or 1))
+        level2_limit = max(1, min(int(level2_limit or 50), 200))
+        level1_preview_limit = max(0, min(int(level1_preview_limit or 10), 50))
+        normalized_status_filter = (download_status_filter or "all").strip().lower()
+        runtime_status_map = runtime_status_map or {}
+
+        def build_level1_groups(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+            groups: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                file_id = row["file_id"]
+                if file_id not in groups:
+                    groups[file_id] = {
+                        "group_id": file_id,
+                        "primary_file_id": file_id,
+                        "primary_media_id": row["id"],
+                        "media_list": [],
+                    }
+                media = row.copy()
+                media["has_thumbnail"] = bool(media.get("thumbnail_path"))
+                groups[file_id]["media_list"].append(media)
+            return groups
+
+        def fetch_media_meta(
+            conn,
+            file_ids: Optional[List[str]] = None,
+            *,
+            order_by_occurrence: bool = False,
+            limit: Optional[int] = None,
+        ) -> Dict[str, Dict[str, Any]]:
+            params: List[Any] = [task_id]
+            where_clause = "WHERE dm.task_id = ?"
+            if file_ids is not None:
+                if not file_ids:
+                    return {}
+                placeholders = ",".join("?" for _ in file_ids)
+                where_clause += f" AND dm.file_id IN ({placeholders})"
+                params.extend(file_ids)
+
+            order_clause = "ORDER BY dm.id"
+            if order_by_occurrence:
+                order_clause = "ORDER BY dm.occurrence_count DESC, dm.id"
+
+            limit_clause = ""
+            if limit is not None:
+                limit_clause = " LIMIT ?"
+                params.append(limit)
+
+            rows = conn.execute(
+                f"""
+                SELECT dm.id, dm.file_id, dm.file_size, dm.duration,
+                       dm.width, dm.height, dm.occurrence_count,
+                       dm.thumbnail_path, dm.thumbnail_width,
+                       dm.thumbnail_height, dm.phash,
+                       dm.first_seen_message_id, dm.first_seen_date
+                FROM dedupe_media dm
+                {where_clause}
+                {order_clause}
+                {limit_clause}
+                """,
+                params,
+            ).fetchall()
+
+            media_meta: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                row_dict = dict(row)
+                row_dict["has_thumbnail"] = bool(row_dict.get("thumbnail_path"))
+                row_dict["downloaded"] = 0
+                media_meta[row_dict["file_id"]] = row_dict
+
+            if media_meta:
+                downloaded_file_ids = list(media_meta.keys())
+                placeholders = ",".join("?" for _ in downloaded_file_ids)
+                downloaded_rows = conn.execute(
+                    f"""
+                    SELECT file_id, MAX(downloaded) AS downloaded
+                    FROM dedupe_results
+                    WHERE task_id = ? AND file_id IN ({placeholders})
+                    GROUP BY file_id
+                    """,
+                    (task_id, *downloaded_file_ids),
+                ).fetchall()
+                for downloaded_row in downloaded_rows:
+                    file_id = downloaded_row["file_id"]
+                    if file_id in media_meta:
+                        media_meta[file_id]["downloaded"] = downloaded_row["downloaded"]
+            return media_meta
+
+        def build_level2_detail(
+            conn,
+            level2_rows: List[sqlite3.Row],
+            *,
+            apply_status_filter: bool,
+        ) -> List[Dict[str, Any]]:
+            if not level2_rows:
+                return []
+
+            level2_groups: List[Dict[str, Any]] = []
+            paged_file_ids: List[str] = []
+            seen_file_ids: set[str] = set()
+            for row in level2_rows:
+                row_dict = dict(row)
+                row_dict["level1_group_ids"] = [
+                    group_id
+                    for group_id in row_dict["level1_group_ids"].split(",")
+                    if group_id
+                ]
+                row_dict["uninterested"] = bool(row_dict.get("uninterested"))
+                level2_groups.append(row_dict)
+                for file_id in row_dict["level1_group_ids"]:
+                    if file_id not in seen_file_ids:
+                        seen_file_ids.add(file_id)
+                        paged_file_ids.append(file_id)
+
+            media_meta = fetch_media_meta(conn, paged_file_ids)
+            file_id_to_group = (
+                build_level1_groups(list(media_meta.values()))
+                if include_level1_groups
+                else {}
+            )
+
+            level2_detail: List[Dict[str, Any]] = []
+            for group in level2_groups:
+                candidate_media = None
+                for file_id in group["level1_group_ids"]:
+                    media = media_meta.get(file_id)
+                    if not media:
+                        continue
+                    size = media.get("file_size") or 0
+                    candidate_size = (candidate_media.get("file_size") or 0) if candidate_media else -1
+                    if candidate_media is None or size > candidate_size:
+                        candidate_media = media
+
+                if candidate_media:
+                    candidate_file_id = candidate_media["file_id"]
+                    runtime_status = runtime_status_map.get(candidate_file_id)
+                    if runtime_status in {"queued", "downloading", "failed", "downloaded"}:
+                        download_status = runtime_status
+                    elif candidate_media.get("downloaded"):
+                        download_status = "downloaded"
+                    else:
+                        download_status = "not_downloaded"
+                else:
+                    candidate_file_id = None
+                    download_status = "not_downloaded"
+
+                if apply_status_filter and normalized_status_filter not in {"", "all"} and download_status != normalized_status_filter:
+                    continue
+
+                level1_groups_in_level2 = []
+                if include_level1_groups:
+                    level1_groups_in_level2 = [
+                        file_id_to_group[level1_group_id]
+                        for level1_group_id in group["level1_group_ids"]
+                        if level1_group_id in file_id_to_group
+                    ]
+                level2_detail.append({
+                    "group_id": group["group_id"],
+                    "primary_level1_group_id": group["primary_level1_group_id"],
+                    "level1_group_ids": group["level1_group_ids"],
+                    "level1_groups": level1_groups_in_level2,
+                    "similarity_score": group["similarity_score"],
+                    "hamming_distance": group["hamming_distance"],
+                    "download_status": download_status,
+                    "download_target_file_id": candidate_file_id,
+                    "download_target_media_id": candidate_media["id"] if candidate_media else None,
+                    "download_target_file_size": candidate_media.get("file_size") if candidate_media else None,
+                    "download_target_duration": candidate_media.get("duration") if candidate_media else None,
+                    "download_target_has_thumbnail": candidate_media.get("has_thumbnail") if candidate_media else False,
+                    "uninterested": group["uninterested"],
+                })
+            return level2_detail
+
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                level1_count = conn.execute(
+                    "SELECT COUNT(*) FROM dedupe_media WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()[0]
+
+                level2_count = conn.execute(
+                    "SELECT COUNT(*) FROM dedupe_level2 WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()[0]
+
+                offset = (level2_page - 1) * level2_limit
+                hidden_clause = " AND uninterested = 0" if not show_uninterested else ""
+
+                if normalized_status_filter in {"", "all"}:
+                    filtered_total = conn.execute(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM dedupe_level2
+                        WHERE task_id = ?{hidden_clause}
+                        """,
+                        (task_id,),
+                    ).fetchone()[0]
+                    paged_level2_rows = conn.execute(
+                        f"""
+                        SELECT *
+                        FROM dedupe_level2
+                        WHERE task_id = ?{hidden_clause}
+                        ORDER BY id
+                        LIMIT ? OFFSET ?
+                        """,
+                        (task_id, level2_limit, offset),
+                    ).fetchall()
+                    level2_detail = build_level2_detail(
+                        conn,
+                        list(paged_level2_rows),
+                        apply_status_filter=False,
+                    )
+                else:
+                    all_level2_rows = conn.execute(
+                        f"""
+                        SELECT *
+                        FROM dedupe_level2
+                        WHERE task_id = ?{hidden_clause}
+                        ORDER BY id
+                        """,
+                        (task_id,),
+                    ).fetchall()
+                    filtered_level2 = build_level2_detail(
+                        conn,
+                        list(all_level2_rows),
+                        apply_status_filter=True,
+                    )
+                    filtered_total = len(filtered_level2)
+                    level2_detail = filtered_level2[offset: offset + level2_limit]
+
+                level1_preview = []
+                if filtered_total == 0 and level1_count > 0 and level1_preview_limit > 0:
+                    preview_meta = fetch_media_meta(
+                        conn,
+                        None,
+                        order_by_occurrence=True,
+                        limit=level1_preview_limit,
+                    )
+                    level1_preview = list(build_level1_groups(list(preview_meta.values())).values())
+
+                return {
+                    "task_id": task_id,
+                    "level1_groups": level1_preview,
+                    "level1_count": level1_count,
+                    "level2_groups": level2_detail,
+                    "level2_count": level2_count,
+                    "level2_pagination": {
+                        "page": level2_page,
+                        "limit": level2_limit,
+                        "total": filtered_total,
+                        "total_pages": (filtered_total + level2_limit - 1) // level2_limit if level2_limit else 0,
+                    },
+                    "download_status_filter": normalized_status_filter,
+                    "show_uninterested": show_uninterested,
+                }
+            finally:
+                conn.close()
+
+    def get_two_level_dedupe_group_detail(
+        self,
+        task_id: int,
+        group_id: str,
+        runtime_status_map: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """获取单个二层去重分组的完整详情。"""
+        runtime_status_map = runtime_status_map or {}
+
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM dedupe_level2
+                    WHERE task_id = ? AND group_id = ?
+                    """,
+                    (task_id, group_id),
+                ).fetchone()
+                if not row:
+                    return None
+
+                group = dict(row)
+                level1_group_ids = [
+                    value
+                    for value in (group.get("level1_group_ids") or "").split(",")
+                    if value
+                ]
+                group["uninterested"] = bool(group.get("uninterested"))
+
+                media_meta: Dict[str, Dict[str, Any]] = {}
+                if level1_group_ids:
+                    placeholders = ",".join("?" for _ in level1_group_ids)
+                    media_rows = conn.execute(
+                        f"""
+                        SELECT dm.id, dm.file_id, dm.file_size, dm.duration,
+                               dm.width, dm.height, dm.occurrence_count,
+                               dm.thumbnail_path, dm.thumbnail_width,
+                               dm.thumbnail_height, dm.phash,
+                               dm.first_seen_message_id, dm.first_seen_date
+                        FROM dedupe_media dm
+                        WHERE dm.task_id = ? AND dm.file_id IN ({placeholders})
+                        ORDER BY dm.id
+                        """,
+                        (task_id, *level1_group_ids),
+                    ).fetchall()
+                    for media_row in media_rows:
+                        media = dict(media_row)
+                        media["has_thumbnail"] = bool(media.get("thumbnail_path"))
+                        media["downloaded"] = 0
+                        media_meta[media["file_id"]] = media
+
+                    downloaded_rows = conn.execute(
+                        f"""
+                        SELECT file_id, MAX(downloaded) AS downloaded
+                        FROM dedupe_results
+                        WHERE task_id = ? AND file_id IN ({placeholders})
+                        GROUP BY file_id
+                        """,
+                        (task_id, *level1_group_ids),
+                    ).fetchall()
+                    for downloaded_row in downloaded_rows:
+                        file_id = downloaded_row["file_id"]
+                        if file_id in media_meta:
+                            media_meta[file_id]["downloaded"] = downloaded_row["downloaded"]
+
+                candidate_media = None
+                for file_id in level1_group_ids:
+                    media = media_meta.get(file_id)
+                    if not media:
+                        continue
+                    size = media.get("file_size") or 0
+                    candidate_size = (candidate_media.get("file_size") or 0) if candidate_media else -1
+                    if candidate_media is None or size > candidate_size:
+                        candidate_media = media
+
+                if candidate_media:
+                    candidate_file_id = candidate_media["file_id"]
+                    runtime_status = runtime_status_map.get(candidate_file_id)
+                    if runtime_status in {"queued", "downloading", "failed", "downloaded"}:
+                        download_status = runtime_status
+                    elif candidate_media.get("downloaded"):
+                        download_status = "downloaded"
+                    else:
+                        download_status = "not_downloaded"
+                else:
+                    candidate_file_id = None
+                    download_status = "not_downloaded"
+
+                level1_groups: Dict[str, Dict[str, Any]] = {}
+                for file_id in level1_group_ids:
+                    media = media_meta.get(file_id)
+                    if not media:
+                        continue
+                    level1_groups[file_id] = {
+                        "group_id": file_id,
+                        "primary_file_id": file_id,
+                        "primary_media_id": media["id"],
+                        "media_list": [media],
+                    }
+
+                return {
+                    "group_id": group["group_id"],
+                    "primary_level1_group_id": group["primary_level1_group_id"],
+                    "level1_group_ids": level1_group_ids,
+                    "level1_groups": [
+                        level1_groups[file_id]
+                        for file_id in level1_group_ids
+                        if file_id in level1_groups
+                    ],
+                    "similarity_score": group["similarity_score"],
+                    "hamming_distance": group["hamming_distance"],
+                    "download_status": download_status,
+                    "download_target_file_id": candidate_file_id,
+                    "download_target_media_id": candidate_media["id"] if candidate_media else None,
+                    "download_target_file_size": candidate_media.get("file_size") if candidate_media else None,
+                    "download_target_duration": candidate_media.get("duration") if candidate_media else None,
+                    "download_target_has_thumbnail": candidate_media.get("has_thumbnail") if candidate_media else False,
+                    "uninterested": group["uninterested"],
+                }
             finally:
                 conn.close()
 

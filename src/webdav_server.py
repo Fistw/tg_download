@@ -358,6 +358,14 @@ class MonitoringApp:
                 # GET /api/dedupe/tasks/{task_id}/dedupe/summary
                 if len(parts) == 7 and parts[5] == "dedupe" and parts[6] == "summary" and method == "GET":
                     return lambda e, s: self.handle_api_dedupe_task_summary(e, s, task_id)
+                # POST /api/dedupe/tasks/{task_id}/dedupe/level2/{group_id}/interest
+                if len(parts) == 9 and parts[5] == "dedupe" and parts[6] == "level2" and parts[8] == "interest" and method == "POST":
+                    group_id = parts[7]
+                    return lambda e, s: self.handle_api_dedupe_task_level2_interest(e, s, task_id, group_id)
+                # GET /api/dedupe/tasks/{task_id}/dedupe/level2/{group_id}
+                if len(parts) == 8 and parts[5] == "dedupe" and parts[6] == "level2" and method == "GET":
+                    group_id = parts[7]
+                    return lambda e, s: self.handle_api_dedupe_task_level2_detail(e, s, task_id, group_id)
                 # GET /api/dedupe/tasks/{task_id}/media/{id_or_file_id}/thumbnail
                 if len(parts) == 7 and parts[5] == "media" and parts[6] == "thumbnail":
                     # 这种情况没有提供 media_id 或 file_id，不处理
@@ -752,6 +760,9 @@ class MonitoringApp:
                 elif file_id:
                     media = _download_db.get_dedupe_media(task_id, file_id)
                     downloaded_count = 1 if media else 0
+
+            if file_id and downloaded_count and hasattr(_deduplicator, "set_download_status"):
+                _deduplicator.set_download_status(task_id, file_id, "queued")
             
             # 在主事件循环中运行下载任务
             asyncio.run_coroutine_threadsafe(
@@ -871,7 +882,11 @@ class MonitoringApp:
             body = self._read_request_body(environ)
             similarity_threshold = body.get("similarity_threshold")
             
-            summary = _deduplicator.run_two_level_dedupe(task_id, similarity_threshold)
+            _deduplicator.run_two_level_dedupe(task_id, similarity_threshold)
+            summary = _download_db.get_two_level_dedupe_summary_page(
+                task_id,
+                include_level1_groups=True,
+            )
             
             response = json.dumps({"success": True, "message": "完整两层去重完成", "summary": summary}, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
@@ -890,13 +905,85 @@ class MonitoringApp:
                 start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
             
-            summary = _download_db.get_two_level_dedupe_summary(task_id)
+            params = self._parse_query_params(environ)
+            level2_page = int(params.get("level2_page", ["1"])[0] or 1)
+            level2_limit = int(params.get("level2_limit", ["50"])[0] or 50)
+            download_status = params.get("download_status", ["all"])[0]
+            show_uninterested = params.get("show_uninterested", ["0"])[0] in {"1", "true", "True"}
+            runtime_status_map = {}
+            if _deduplicator and hasattr(_deduplicator, "get_download_status_map"):
+                runtime_status_map = _deduplicator.get_download_status_map(task_id)
+            summary = _download_db.get_two_level_dedupe_summary_page(
+                task_id,
+                level2_page=level2_page,
+                level2_limit=level2_limit,
+                download_status_filter=download_status,
+                runtime_status_map=runtime_status_map,
+                show_uninterested=show_uninterested,
+                include_level1_groups=True,
+            )
             
             response = json.dumps(summary, ensure_ascii=False).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
             logger.error(f"获取去重汇总失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_level2_detail(self, environ, start_response, task_id: int, group_id: str):
+        """GET /api/dedupe/tasks/{task_id}/dedupe/level2/{group_id} - 获取单个二层分组详情"""
+        try:
+            if not _download_db:
+                error = json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+
+            runtime_status_map = {}
+            if _deduplicator and hasattr(_deduplicator, "get_download_status_map"):
+                runtime_status_map = _deduplicator.get_download_status_map(task_id)
+
+            detail = _download_db.get_two_level_dedupe_group_detail(
+                task_id,
+                group_id,
+                runtime_status_map=runtime_status_map,
+            )
+            if not detail:
+                error = json.dumps({"error": "分组不存在"}, ensure_ascii=False).encode("utf-8")
+                start_response("404 Not Found", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+
+            response = json.dumps(detail, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"获取二层分组详情失败: {e}")
+            error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
+            start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+            return [error]
+
+    def handle_api_dedupe_task_level2_interest(self, environ, start_response, task_id: int, group_id: str):
+        """POST /api/dedupe/tasks/{task_id}/dedupe/level2/{group_id}/interest - 设置分组兴趣状态"""
+        try:
+            if not _download_db:
+                error = json.dumps({"error": "数据库未初始化"}, ensure_ascii=False).encode("utf-8")
+                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+                return [error]
+
+            body = self._read_request_body(environ)
+            uninterested = bool(body.get("uninterested", True))
+            _download_db.set_dedupe_level2_uninterested(task_id, group_id, uninterested=uninterested)
+
+            response = json.dumps({
+                "success": True,
+                "group_id": group_id,
+                "uninterested": uninterested,
+            }, ensure_ascii=False).encode("utf-8")
+            start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
+            return [response]
+        except Exception as e:
+            logger.error(f"设置分组兴趣状态失败: {e}")
             error = json.dumps({"error": str(e)}, ensure_ascii=False).encode("utf-8")
             start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
             return [error]
