@@ -743,34 +743,33 @@ class MonitoringApp:
                 error = json.dumps({"error": "去重器未初始化"}, ensure_ascii=False).encode("utf-8")
                 start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
                 return [error]
-            
-            if not _main_event_loop:
-                error = json.dumps({"error": "事件循环未初始化"}, ensure_ascii=False).encode("utf-8")
-                start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
-                return [error]
-            
-            # 计算要下载的数量
-            downloaded_count = 0
+
+            queued_file_ids: list[str] = []
+            file_ids: list[str] = []
             if _download_db:
                 if download_all:
-                    # 获取所有独特和重复媒体的总数（不限制分页）
-                    media_list, total_singles = _download_db.get_dedupe_media_list(task_id, filter_type="singles", limit=10000)
-                    duplicates, total_duplicates = _download_db.get_dedupe_media_list(task_id, filter_type="duplicates", limit=10000)
-                    downloaded_count = total_singles + total_duplicates
+                    media_list, _ = _download_db.get_dedupe_media_list(task_id, filter_type="singles", limit=10000)
+                    duplicates, _ = _download_db.get_dedupe_media_list(task_id, filter_type="duplicates", limit=10000)
+                    file_ids = [item["file_id"] for item in media_list + duplicates if item.get("file_id")]
                 elif file_id:
                     media = _download_db.get_dedupe_media(task_id, file_id)
-                    downloaded_count = 1 if media else 0
+                    if media:
+                        file_ids = [file_id]
 
-            if file_id and downloaded_count and hasattr(_deduplicator, "set_download_status"):
-                _deduplicator.set_download_status(task_id, file_id, "queued")
-            
-            # 在主事件循环中运行下载任务
-            asyncio.run_coroutine_threadsafe(
-                _deduplicator.download_media(task_id, output_dir, file_id=file_id, download_all=download_all),
-                _main_event_loop
-            )
-            
-            response = json.dumps({"success": True, "message": "下载任务已启动", "downloaded_count": downloaded_count}, ensure_ascii=False).encode("utf-8")
+                queued_file_ids = _download_db.enqueue_dedupe_download_jobs(task_id, file_ids, output_dir)
+
+            for current_file_id in queued_file_ids:
+                if hasattr(_deduplicator, "set_download_status"):
+                    _deduplicator.set_download_status(task_id, current_file_id, "queued")
+
+            response = json.dumps(
+                {
+                    "success": True,
+                    "message": "下载任务已加入队列",
+                    "downloaded_count": len(queued_file_ids),
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8")])
             return [response]
         except Exception as e:
@@ -910,6 +909,16 @@ class MonitoringApp:
             level2_limit = int(params.get("level2_limit", ["50"])[0] or 50)
             download_status = params.get("download_status", ["all"])[0]
             show_uninterested = params.get("show_uninterested", ["0"])[0] in {"1", "true", "True"}
+            min_download_size_mb = params.get("min_download_size_mb", [None])[0]
+            max_download_size_mb = params.get("max_download_size_mb", [None])[0]
+            min_download_size_bytes = None
+            max_download_size_bytes = None
+            if min_download_size_mb in (None, ""):
+                min_download_size_bytes = 50 * 1024 * 1024
+            else:
+                min_download_size_bytes = int(float(min_download_size_mb) * 1024 * 1024)
+            if max_download_size_mb not in (None, ""):
+                max_download_size_bytes = int(float(max_download_size_mb) * 1024 * 1024)
             runtime_status_map = {}
             if _deduplicator and hasattr(_deduplicator, "get_download_status_map"):
                 runtime_status_map = _deduplicator.get_download_status_map(task_id)
@@ -921,6 +930,8 @@ class MonitoringApp:
                 runtime_status_map=runtime_status_map,
                 show_uninterested=show_uninterested,
                 include_level1_groups=True,
+                min_download_size_bytes=min_download_size_bytes,
+                max_download_size_bytes=max_download_size_bytes,
             )
             
             response = json.dumps(summary, ensure_ascii=False).encode("utf-8")

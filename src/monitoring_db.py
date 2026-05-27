@@ -15,6 +15,7 @@ class MonitoringDB:
     def __init__(self, db_path: str | Path = "./data/monitoring.db", retention_days: int = 7):
         self.db_path = Path(db_path)
         self.retention_days = retention_days
+        self.downloads_dir = Path("./downloads")
         # 确保目录存在
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize_db()
@@ -99,6 +100,7 @@ class MonitoringDB:
                 conn.commit()
             finally:
                 conn.close()
+        self.reconcile_stale_downloads()
 
     def cleanup_old_data(self) -> None:
         """清理保留天数之前的数据"""
@@ -184,6 +186,7 @@ class MonitoringDB:
         limit: int = 100
     ) -> list[dict]:
         """获取下载指标"""
+        self.reconcile_stale_downloads()
         cutoff = datetime.now() - timedelta(hours=hours)
         cutoff_str = cutoff.isoformat()
         with _db_lock:
@@ -200,6 +203,59 @@ class MonitoringDB:
                 return [dict(row) for row in cursor.fetchall()]
             finally:
                 conn.close()
+
+    def reconcile_stale_downloads(
+        self,
+        stale_minutes: int = 30,
+        zero_progress_stale_minutes: int = 10,
+    ) -> int:
+        """将长时间无进度的 downloading 记录修正为 completed/failed。"""
+        reconciled = 0
+
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                rows = conn.execute("""
+                    SELECT id, filename, file_size_bytes, downloaded_bytes
+                    FROM download_metrics
+                    WHERE status = 'downloading'
+                      AND (
+                        (COALESCE(downloaded_bytes, 0) <= 0 AND datetime(updated_at) < datetime('now', ?))
+                        OR
+                        (COALESCE(downloaded_bytes, 0) > 0 AND datetime(updated_at) < datetime('now', ?))
+                      )
+                """, (
+                    f"-{int(zero_progress_stale_minutes)} minutes",
+                    f"-{int(stale_minutes)} minutes",
+                )).fetchall()
+
+                for row in rows:
+                    file_path = self.downloads_dir / row["filename"]
+                    actual_size = file_path.stat().st_size if file_path.exists() else 0
+                    expected_size = row["file_size_bytes"] or 0
+                    recorded_downloaded = row["downloaded_bytes"] or 0
+
+                    if file_path.exists() and actual_size > 0 and actual_size >= max(expected_size, recorded_downloaded):
+                        conn.execute("""
+                            UPDATE download_metrics
+                            SET downloaded_bytes = ?, file_size_bytes = ?, speed_kb_s = 0,
+                                status = 'completed', updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        """, (actual_size, max(actual_size, expected_size), row["id"]))
+                    else:
+                        conn.execute("""
+                            UPDATE download_metrics
+                            SET status = 'failed', speed_kb_s = 0, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        """, (row["id"],))
+                    reconciled += 1
+
+                if reconciled:
+                    conn.commit()
+            finally:
+                conn.close()
+
+        return reconciled
 
     # ==================== 上传指标 ====================
 

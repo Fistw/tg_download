@@ -152,6 +152,8 @@ export interface TwoLevelDedupeSummary {
   };
   download_status_filter?: string;
   show_uninterested?: boolean;
+  min_download_size_bytes?: number | null;
+  max_download_size_bytes?: number | null;
 }
 
 export interface RunLevel2DedupeResponse {

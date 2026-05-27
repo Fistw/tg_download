@@ -15,6 +15,7 @@ from .database import DownloadDB
 from .limiter import FloodWaitCoordinator, get_flood_coordinator
 from .downloader import download_message, _is_video
 from .image_similarity import ImageSimilarity
+from .cache import cleanup_cache
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,36 @@ class Deduplicator:
         client: TelegramClient,
         db: DownloadDB,
         flood_coordinator: Optional[FloodWaitCoordinator] = None,
+        download_config: Optional[Any] = None,
     ) -> None:
         self._client = client
         self._db = db
         self._flood_coordinator = flood_coordinator or get_flood_coordinator()
+        self._download_config = download_config
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # 默认不暂停
         self._download_statuses: Dict[int, Dict[str, str]] = {}
         self._download_status_lock = threading.RLock()
+
+    def _cleanup_download_cache(self, output_dir: Path) -> None:
+        """按下载配置清理本地缓存。"""
+        config = self._download_config
+        if not config or not getattr(config, "enable_cache_cleanup", False):
+            return
+
+        try:
+            cleanup_result = cleanup_cache(
+                output_dir,
+                getattr(config, "cache_retention_days", 3),
+                getattr(config, "max_cache_size_gb", 8.0),
+            )
+            logger.info(
+                "去重下载缓存清理完成：删除 %d 个文件，释放 %d 字节",
+                len(cleanup_result.deleted_files),
+                cleanup_result.total_freed_bytes,
+            )
+        except Exception as e:
+            logger.error("去重下载缓存清理失败: %s", e)
 
     def set_download_status(self, task_id: int, file_id: str, status: str) -> None:
         """记录指定媒体当前下载状态。"""
@@ -45,7 +68,12 @@ class Deduplicator:
     def get_download_status_map(self, task_id: int) -> Dict[str, str]:
         """获取任务下所有已知下载状态。"""
         with self._download_status_lock:
-            return dict(self._download_statuses.get(task_id, {}))
+            runtime_map = dict(self._download_statuses.get(task_id, {}))
+        persisted_map: Dict[str, str] = {}
+        if hasattr(self._db, "get_dedupe_download_job_status_map"):
+            persisted_map = self._db.get_dedupe_download_job_status_map(task_id)
+        persisted_map.update(runtime_map)
+        return persisted_map
 
     def create_task(
         self,
@@ -414,34 +442,59 @@ class Deduplicator:
             if media is None:
                 continue
 
-            message_id = media["first_seen_message_id"]
             current_file_id = media["file_id"]
             try:
-                self.set_download_status(task_id, current_file_id, "downloading")
-                message = await self._client.get_messages(chat_id, ids=message_id)
-                if message and _is_video(message):
-                    await self._flood_coordinator.wait_if_needed()
-                    result = await download_message(
-                        self._client,
-                        message,
-                        output_dir,
-                        flood_coordinator=self._flood_coordinator,
-                    )
-                    if result:
-                        downloaded_count += 1
-                        self._db.mark_dedupe_result_downloaded(task_id, current_file_id, True)
-                        self.set_download_status(task_id, current_file_id, "downloaded")
-                        logger.info("已下载: %s", result)
-                    else:
-                        self.set_download_status(task_id, current_file_id, "failed")
-                else:
-                    self.set_download_status(task_id, current_file_id, "failed")
+                if await self.download_single_media(task_id, output_dir, current_file_id):
+                    downloaded_count += 1
             except Exception as e:
                 self.set_download_status(task_id, current_file_id, "failed")
-                logger.error("下载消息 %d 失败: %s", message_id, e)
+                logger.error("下载 file_id %s 失败: %s", current_file_id, e)
                 continue
 
         return downloaded_count
+
+    async def download_single_media(
+        self,
+        task_id: int,
+        output_dir: str | Path,
+        file_id: str,
+    ) -> bool:
+        """下载单个媒体，供调度器和批量下载共用。"""
+        task = self._db.get_dedupe_task(task_id)
+        if not task:
+            raise ValueError(f"任务 {task_id} 不存在")
+
+        media = self._db.get_dedupe_media(task_id, file_id)
+        if not media:
+            raise ValueError(f"任务 {task_id} 中不存在 file_id={file_id} 的媒体")
+
+        chat_id = task["chat_id"]
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        message_id = media["first_seen_message_id"]
+        self.set_download_status(task_id, file_id, "downloading")
+        message = await self._client.get_messages(chat_id, ids=message_id)
+        if not message or not _is_video(message):
+            self.set_download_status(task_id, file_id, "failed")
+            raise RuntimeError(f"消息 {message_id} 不存在或不包含视频")
+
+        await self._flood_coordinator.wait_if_needed()
+        result = await download_message(
+            self._client,
+            message,
+            output_dir,
+            flood_coordinator=self._flood_coordinator,
+        )
+        if not result:
+            self.set_download_status(task_id, file_id, "failed")
+            raise RuntimeError(f"消息 {message_id} 下载未产生输出文件")
+
+        self._db.mark_dedupe_result_downloaded(task_id, file_id, True)
+        self.set_download_status(task_id, file_id, "downloaded")
+        logger.info("已下载: %s", result)
+        self._cleanup_download_cache(output_dir)
+        return True
 
     def compute_phashes_for_task(self, task_id: int, clear_existing: bool = True) -> int:
         """
@@ -619,6 +672,7 @@ class Deduplicator:
         summary = self._db.get_two_level_dedupe_summary_page(
             task_id,
             runtime_status_map=self.get_download_status_map(task_id),
+            min_download_size_bytes=50 * 1024 * 1024,
         )
 
         # 统计已计算的哈希数量

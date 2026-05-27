@@ -178,7 +178,7 @@ async def _cmd_serve(args, config) -> None:
         logging.warning(f"无法初始化监控数据库: {e}")
 
     # 初始化去重器
-    deduper = Deduplicator(manager.user, history)
+    deduper = Deduplicator(manager.user, history, download_config=config.download)
     
     # 先获取聊天列表并缓存
     chats = []

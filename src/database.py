@@ -107,6 +107,17 @@ class DownloadDB:
         # 旧的下载表迁移
         cursor = conn.execute("PRAGMA table_info(downloads)")
         columns = {row[1] for row in cursor.fetchall()}
+
+        if "status" not in columns:
+            conn.execute("ALTER TABLE downloads ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'")
+        if "source" not in columns:
+            conn.execute("ALTER TABLE downloads ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'")
+        if "error_message" not in columns:
+            conn.execute("ALTER TABLE downloads ADD COLUMN error_message TEXT")
+        if "created_at" not in columns:
+            conn.execute("ALTER TABLE downloads ADD COLUMN created_at TIMESTAMP")
+        if "updated_at" not in columns:
+            conn.execute("ALTER TABLE downloads ADD COLUMN updated_at TIMESTAMP")
         
         # 添加 downloaded_bytes 字段
         if "downloaded_bytes" not in columns:
@@ -123,6 +134,17 @@ class DownloadDB:
         # 添加 retry_count 字段
         if "retry_count" not in columns:
             conn.execute("ALTER TABLE downloads ADD COLUMN retry_count INTEGER DEFAULT 0")
+
+        # 为历史数据回填缺失字段，避免旧库升级后新逻辑读到 NULL。
+        conn.execute("""
+            UPDATE downloads
+            SET status = COALESCE(status, 'completed'),
+                source = COALESCE(source, 'legacy'),
+                created_at = COALESCE(created_at, downloaded_at, CURRENT_TIMESTAMP),
+                updated_at = COALESCE(updated_at, downloaded_at, created_at, CURRENT_TIMESTAMP),
+                downloaded_bytes = COALESCE(downloaded_bytes, 0),
+                retry_count = COALESCE(retry_count, 0)
+        """)
         
         # 创建去重任务表
         conn.execute(
@@ -235,8 +257,32 @@ class DownloadDB:
                 similarity_score REAL,
                 hamming_distance INTEGER,
                 uninterested INTEGER DEFAULT 0,
+                download_target_file_id TEXT,
+                download_target_media_id INTEGER,
+                download_target_file_size INTEGER,
+                download_target_duration REAL,
+                download_target_has_thumbnail INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(task_id, group_id)
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dedupe_download_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                output_dir TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER DEFAULT 0,
+                max_attempts INTEGER DEFAULT 3,
+                last_error TEXT,
+                next_retry_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(task_id, file_id)
             )
             """
         )
@@ -245,6 +291,16 @@ class DownloadDB:
         dedupe_level2_columns = {row[1] for row in cursor.fetchall()}
         if "uninterested" not in dedupe_level2_columns:
             conn.execute("ALTER TABLE dedupe_level2 ADD COLUMN uninterested INTEGER DEFAULT 0")
+        if "download_target_file_id" not in dedupe_level2_columns:
+            conn.execute("ALTER TABLE dedupe_level2 ADD COLUMN download_target_file_id TEXT")
+        if "download_target_media_id" not in dedupe_level2_columns:
+            conn.execute("ALTER TABLE dedupe_level2 ADD COLUMN download_target_media_id INTEGER")
+        if "download_target_file_size" not in dedupe_level2_columns:
+            conn.execute("ALTER TABLE dedupe_level2 ADD COLUMN download_target_file_size INTEGER")
+        if "download_target_duration" not in dedupe_level2_columns:
+            conn.execute("ALTER TABLE dedupe_level2 ADD COLUMN download_target_duration REAL")
+        if "download_target_has_thumbnail" not in dedupe_level2_columns:
+            conn.execute("ALTER TABLE dedupe_level2 ADD COLUMN download_target_has_thumbnail INTEGER DEFAULT 0")
         
         # 创建索引以提升查询性能
         self._create_indexes(conn)
@@ -282,6 +338,18 @@ class DownloadDB:
             CREATE INDEX IF NOT EXISTS idx_dedupe_level2_task_interest_id
             ON dedupe_level2(task_id, uninterested, id)
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_level2_task_interest_size_id
+            ON dedupe_level2(task_id, uninterested, download_target_file_size, id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_download_jobs_task_status_retry
+            ON dedupe_download_jobs(task_id, status, next_retry_at, updated_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dedupe_download_jobs_status_retry
+            ON dedupe_download_jobs(status, next_retry_at, updated_at)
+        """)
         
         logger.info("数据库索引创建完成")
 
@@ -314,8 +382,9 @@ class DownloadDB:
                     return existing["id"]
 
                 cur = conn.execute(
-                    "INSERT INTO downloads (channel, message_id, source, filename, file_size, total_bytes) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO downloads "
+                    "(channel, message_id, source, filename, file_size, total_bytes, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                     (channel, message_id, source, filename, file_size, total_bytes),
                 )
                 conn.commit()
@@ -468,8 +537,9 @@ class DownloadDB:
                 existing = self.get_task(channel, message_id)
                 if existing is None:
                     conn.execute(
-                        "INSERT INTO downloads (channel, message_id, filename, file_size, status) "
-                        "VALUES (?, ?, ?, ?, 'completed')",
+                        "INSERT INTO downloads "
+                        "(channel, message_id, filename, file_size, status, source, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, 'completed', 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                         (channel, message_id, filename, file_size),
                     )
                 else:
@@ -845,6 +915,259 @@ class DownloadDB:
             finally:
                 conn.close()
 
+    def is_dedupe_result_downloaded(self, task_id: int, file_id: str) -> bool:
+        """检查指定去重媒体是否已下载完成。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT MAX(downloaded)
+                    FROM dedupe_results
+                    WHERE task_id = ? AND file_id = ?
+                    """,
+                    (task_id, file_id),
+                ).fetchone()
+                return bool(row[0]) if row and row[0] is not None else False
+            finally:
+                conn.close()
+
+    def enqueue_dedupe_download_jobs(
+        self,
+        task_id: int,
+        file_ids: List[str],
+        output_dir: str,
+        max_attempts: int = 3,
+    ) -> List[str]:
+        """将二层去重下载任务加入持久化队列。"""
+        if not file_ids:
+            return []
+
+        queued_file_ids: List[str] = []
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                for file_id in file_ids:
+                    if not file_id:
+                        continue
+
+                    downloaded_row = conn.execute(
+                        """
+                        SELECT MAX(downloaded)
+                        FROM dedupe_results
+                        WHERE task_id = ? AND file_id = ?
+                        """,
+                        (task_id, file_id),
+                    ).fetchone()
+                    if downloaded_row and downloaded_row[0]:
+                        continue
+
+                    existing = conn.execute(
+                        """
+                        SELECT id, status
+                        FROM dedupe_download_jobs
+                        WHERE task_id = ? AND file_id = ?
+                        """,
+                        (task_id, file_id),
+                    ).fetchone()
+
+                    if existing is None:
+                        conn.execute(
+                            """
+                            INSERT INTO dedupe_download_jobs
+                            (task_id, file_id, output_dir, status, max_attempts, created_at, updated_at)
+                            VALUES (?, ?, ?, 'queued', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            """,
+                            (task_id, file_id, output_dir, max_attempts),
+                        )
+                        queued_file_ids.append(file_id)
+                        continue
+
+                    if existing["status"] in {"queued", "retrying", "downloading"}:
+                        continue
+
+                    conn.execute(
+                        """
+                        UPDATE dedupe_download_jobs
+                        SET output_dir = ?, status = 'queued', attempt_count = 0,
+                            max_attempts = ?, last_error = NULL, next_retry_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (output_dir, max_attempts, existing["id"]),
+                    )
+                    queued_file_ids.append(file_id)
+
+                conn.commit()
+                return queued_file_ids
+            finally:
+                conn.close()
+
+    def reset_incomplete_dedupe_download_jobs(self) -> int:
+        """服务重启后，将运行中的下载任务重新置回队列。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    UPDATE dedupe_download_jobs
+                    SET status = 'queued', next_retry_at = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE status = 'downloading'
+                    """
+                )
+                conn.commit()
+                return cursor.rowcount
+            finally:
+                conn.close()
+
+    def list_runnable_dedupe_download_jobs(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """获取可立即执行的二层去重下载任务。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM dedupe_download_jobs
+                    WHERE status IN ('queued', 'retrying')
+                      AND (next_retry_at IS NULL OR datetime(next_retry_at) <= datetime('now'))
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+
+    def mark_dedupe_download_job_running(self, job_id: int) -> None:
+        """标记二层去重下载任务为运行中。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    UPDATE dedupe_download_jobs
+                    SET status = 'downloading', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (job_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def complete_dedupe_download_job(self, job_id: int) -> None:
+        """标记二层去重下载任务已完成。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    UPDATE dedupe_download_jobs
+                    SET status = 'completed', next_retry_at = NULL, last_error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (job_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def requeue_dedupe_download_job(self, job_id: int) -> None:
+        """取消中的任务重新回到队列。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    UPDATE dedupe_download_jobs
+                    SET status = 'queued', next_retry_at = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (job_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def fail_dedupe_download_job(
+        self,
+        job_id: int,
+        error_message: str,
+        retry_delay_seconds: int,
+    ) -> str:
+        """根据重试次数决定是重试还是最终失败。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT attempt_count, max_attempts
+                    FROM dedupe_download_jobs
+                    WHERE id = ?
+                    """,
+                    (job_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"下载任务 {job_id} 不存在")
+
+                next_attempt = int(row["attempt_count"] or 0) + 1
+                max_attempts = int(row["max_attempts"] or 3)
+
+                if next_attempt >= max_attempts:
+                    status = "failed"
+                    conn.execute(
+                        """
+                        UPDATE dedupe_download_jobs
+                        SET status = 'failed', attempt_count = ?, last_error = ?,
+                            next_retry_at = NULL, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (next_attempt, error_message, job_id),
+                    )
+                else:
+                    status = "retrying"
+                    conn.execute(
+                        """
+                        UPDATE dedupe_download_jobs
+                        SET status = 'retrying', attempt_count = ?, last_error = ?,
+                            next_retry_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (next_attempt, error_message, f"+{int(retry_delay_seconds)} seconds", job_id),
+                    )
+
+                conn.commit()
+                return status
+            finally:
+                conn.close()
+
+    def get_dedupe_download_job_status_map(self, task_id: int) -> Dict[str, str]:
+        """获取任务中所有下载队列状态，用于前端展示。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT file_id, status
+                    FROM dedupe_download_jobs
+                    WHERE task_id = ?
+                      AND status IN ('queued', 'retrying', 'downloading', 'failed')
+                    """,
+                    (task_id,),
+                ).fetchall()
+                status_map: Dict[str, str] = {}
+                for row in rows:
+                    status = row["status"]
+                    if status == "retrying":
+                        status = "queued"
+                    status_map[row["file_id"]] = status
+                return status_map
+            finally:
+                conn.close()
+
     def batch_add_dedupe_media(self, media_list: list) -> None:
         """批量添加去重媒体记录，提升性能。"""
         if not media_list:
@@ -1073,18 +1396,24 @@ class DownloadDB:
             conn = self._get_connection()
             try:
                 level1_group_ids_str = ",".join(level1_group_ids)
+                target = self._compute_level2_download_target(conn, task_id, level1_group_ids)
                 cursor = conn.execute(
                     """
                     INSERT OR REPLACE INTO dedupe_level2
                     (task_id, group_id, primary_level1_group_id, level1_group_ids,
-                     similarity_score, hamming_distance, uninterested)
+                     similarity_score, hamming_distance, uninterested,
+                     download_target_file_id, download_target_media_id, download_target_file_size,
+                     download_target_duration, download_target_has_thumbnail)
                     VALUES (?, ?, ?, ?, ?, ?, COALESCE(
                         (SELECT uninterested FROM dedupe_level2 WHERE task_id = ? AND group_id = ?),
                         0
-                    ))
+                    ), ?, ?, ?, ?, ?)
                     """,
                     (task_id, group_id, primary_level1_group_id, level1_group_ids_str,
-                     similarity_score, hamming_distance, task_id, group_id)
+                     similarity_score, hamming_distance, task_id, group_id,
+                     target["download_target_file_id"], target["download_target_media_id"],
+                     target["download_target_file_size"], target["download_target_duration"],
+                     target["download_target_has_thumbnail"])
                 )
                 conn.commit()
                 return cursor.lastrowid
@@ -1130,6 +1459,98 @@ class DownloadDB:
             finally:
                 conn.close()
 
+    def _compute_level2_download_target(
+        self,
+        conn: sqlite3.Connection,
+        task_id: int,
+        level1_group_ids: List[str],
+    ) -> Dict[str, Any]:
+        """计算二层分组默认下载目标：组内最大文件。"""
+        if not level1_group_ids:
+            return {
+                "download_target_file_id": None,
+                "download_target_media_id": None,
+                "download_target_file_size": None,
+                "download_target_duration": None,
+                "download_target_has_thumbnail": 0,
+            }
+
+        placeholders = ",".join("?" for _ in level1_group_ids)
+        rows = conn.execute(
+            f"""
+            SELECT id, file_id, file_size, duration, thumbnail_path
+            FROM dedupe_media
+            WHERE task_id = ? AND file_id IN ({placeholders})
+            ORDER BY COALESCE(file_size, 0) DESC, id ASC
+            """,
+            (task_id, *level1_group_ids),
+        ).fetchall()
+        if not rows:
+            return {
+                "download_target_file_id": None,
+                "download_target_media_id": None,
+                "download_target_file_size": None,
+                "download_target_duration": None,
+                "download_target_has_thumbnail": 0,
+            }
+
+        top = rows[0]
+        return {
+            "download_target_file_id": top["file_id"],
+            "download_target_media_id": top["id"],
+            "download_target_file_size": top["file_size"],
+            "download_target_duration": top["duration"],
+            "download_target_has_thumbnail": int(bool(top["thumbnail_path"])),
+        }
+
+    def _backfill_level2_download_targets(self, conn: sqlite3.Connection, task_id: int) -> int:
+        """为缺失默认下载目标的二层分组补全缓存字段。"""
+        rows = conn.execute(
+            """
+            SELECT id, level1_group_ids
+            FROM dedupe_level2
+            WHERE task_id = ?
+              AND (
+                download_target_file_id IS NULL
+                OR download_target_media_id IS NULL
+                OR download_target_file_size IS NULL
+              )
+            """,
+            (task_id,),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        updates = []
+        for row in rows:
+            level1_group_ids = [group_id for group_id in (row["level1_group_ids"] or "").split(",") if group_id]
+            target = self._compute_level2_download_target(conn, task_id, level1_group_ids)
+            updates.append(
+                (
+                    target["download_target_file_id"],
+                    target["download_target_media_id"],
+                    target["download_target_file_size"],
+                    target["download_target_duration"],
+                    target["download_target_has_thumbnail"],
+                    row["id"],
+                )
+            )
+
+        conn.executemany(
+            """
+            UPDATE dedupe_level2
+            SET download_target_file_id = ?,
+                download_target_media_id = ?,
+                download_target_file_size = ?,
+                download_target_duration = ?,
+                download_target_has_thumbnail = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
+        conn.commit()
+        return len(updates)
+
     def get_two_level_dedupe_summary_page(
         self,
         task_id: int,
@@ -1140,6 +1561,8 @@ class DownloadDB:
         runtime_status_map: Optional[Dict[str, str]] = None,
         show_uninterested: bool = False,
         include_level1_groups: bool = False,
+        min_download_size_bytes: Optional[int] = None,
+        max_download_size_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """获取分页后的两层去重汇总，避免一次性返回超大结果。"""
         level2_page = max(1, int(level2_page or 1))
@@ -1147,6 +1570,8 @@ class DownloadDB:
         level1_preview_limit = max(0, min(int(level1_preview_limit or 10), 50))
         normalized_status_filter = (download_status_filter or "all").strip().lower()
         runtime_status_map = runtime_status_map or {}
+        normalized_min_size = None if min_download_size_bytes in (None, "") else max(0, int(min_download_size_bytes))
+        normalized_max_size = None if max_download_size_bytes in (None, "") else max(0, int(max_download_size_bytes))
 
         def build_level1_groups(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
             groups: Dict[str, Dict[str, Any]] = {}
@@ -1327,27 +1752,44 @@ class DownloadDB:
                     (task_id,),
                 ).fetchone()[0]
 
+                if level2_count > 0:
+                    self._backfill_level2_download_targets(conn, task_id)
+
                 offset = (level2_page - 1) * level2_limit
-                hidden_clause = " AND uninterested = 0" if not show_uninterested else ""
+                filter_clauses: List[str] = []
+                filter_params: List[Any] = [task_id]
+
+                if not show_uninterested:
+                    filter_clauses.append("uninterested = 0")
+                if normalized_min_size is not None:
+                    filter_clauses.append("COALESCE(download_target_file_size, 0) >= ?")
+                    filter_params.append(normalized_min_size)
+                if normalized_max_size is not None:
+                    filter_clauses.append("COALESCE(download_target_file_size, 0) <= ?")
+                    filter_params.append(normalized_max_size)
+
+                where_sql = "WHERE task_id = ?"
+                if filter_clauses:
+                    where_sql += " AND " + " AND ".join(filter_clauses)
 
                 if normalized_status_filter in {"", "all"}:
                     filtered_total = conn.execute(
                         f"""
                         SELECT COUNT(*)
                         FROM dedupe_level2
-                        WHERE task_id = ?{hidden_clause}
+                        {where_sql}
                         """,
-                        (task_id,),
+                        filter_params,
                     ).fetchone()[0]
                     paged_level2_rows = conn.execute(
                         f"""
                         SELECT *
                         FROM dedupe_level2
-                        WHERE task_id = ?{hidden_clause}
+                        {where_sql}
                         ORDER BY id
                         LIMIT ? OFFSET ?
                         """,
-                        (task_id, level2_limit, offset),
+                        [*filter_params, level2_limit, offset],
                     ).fetchall()
                     level2_detail = build_level2_detail(
                         conn,
@@ -1359,10 +1801,10 @@ class DownloadDB:
                         f"""
                         SELECT *
                         FROM dedupe_level2
-                        WHERE task_id = ?{hidden_clause}
+                        {where_sql}
                         ORDER BY id
                         """,
-                        (task_id,),
+                        filter_params,
                     ).fetchall()
                     filtered_level2 = build_level2_detail(
                         conn,
@@ -1396,6 +1838,8 @@ class DownloadDB:
                     },
                     "download_status_filter": normalized_status_filter,
                     "show_uninterested": show_uninterested,
+                    "min_download_size_bytes": normalized_min_size,
+                    "max_download_size_bytes": normalized_max_size,
                 }
             finally:
                 conn.close()

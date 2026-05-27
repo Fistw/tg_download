@@ -139,6 +139,10 @@ export default function Dedupe() {
   const [level2PageInputValue, setLevel2PageInputValue] = useState<string>('1')
   const [level2DownloadStatusFilter, setLevel2DownloadStatusFilter] = useState<string>('all')
   const [showUninterestedLevel2Groups, setShowUninterestedLevel2Groups] = useState(false)
+  const [level2MinSizeMbInput, setLevel2MinSizeMbInput] = useState<string>('50')
+  const [level2MaxSizeMbInput, setLevel2MaxSizeMbInput] = useState<string>('')
+  const [appliedLevel2MinSizeMb, setAppliedLevel2MinSizeMb] = useState<string>('50')
+  const [appliedLevel2MaxSizeMb, setAppliedLevel2MaxSizeMb] = useState<string>('')
   const level2Limit = 50
   
   // 鼠标悬浮显示预览
@@ -171,6 +175,66 @@ export default function Dedupe() {
   const showNotification = (message: string, type: 'success' | 'error') => {
     setNotification({ message, type })
   }
+
+  const updateLevel2GroupState = useCallback(
+    (
+      groupId: string,
+      updater: (group: DedupeLevel2Group) => DedupeLevel2Group | null
+    ) => {
+      setDedupeSummary((prev) => {
+        if (!prev) return prev
+
+        let changed = false
+        const nextGroups: DedupeLevel2Group[] = []
+        let removed = false
+
+        for (const group of prev.level2_groups) {
+          if (group.group_id !== groupId) {
+            nextGroups.push(group)
+            continue
+          }
+
+          const updated = updater(group)
+          changed = true
+          if (updated) {
+            nextGroups.push(updated)
+          } else {
+            removed = true
+          }
+        }
+
+        if (!changed) return prev
+
+        const nextPagination = prev.level2_pagination
+          ? {
+              ...prev.level2_pagination,
+              total: removed ? Math.max(0, prev.level2_pagination.total - 1) : prev.level2_pagination.total,
+            }
+          : prev.level2_pagination
+
+        return {
+          ...prev,
+          level2_groups: nextGroups,
+          level2_pagination: nextPagination,
+        }
+      })
+
+      setLevel2GroupDetails((prev) => {
+        if (!(groupId in prev)) return prev
+        const current = prev[groupId]
+        const updated = updater(current)
+        if (!updated) {
+          const { [groupId]: _, ...rest } = prev
+          return rest
+        }
+        return {
+          ...prev,
+          [groupId]: updated,
+        }
+      })
+    },
+    []
+  )
 
   const getLevel2DownloadStatusColor = (
     status?: string
@@ -412,11 +476,15 @@ export default function Dedupe() {
     if (!currentTask) return;
     setLoadingDedupe(true);
     try {
+      const minDownloadSizeMb = appliedLevel2MinSizeMb.trim() === '' ? 0 : Number(appliedLevel2MinSizeMb)
+      const maxDownloadSizeMb = appliedLevel2MaxSizeMb.trim() === '' ? undefined : Number(appliedLevel2MaxSizeMb)
       const summary = await apiClient.getTwoLevelDedupeSummary(currentTask.id, {
         level2_page: pageNum,
         level2_limit: level2Limit,
         download_status: level2DownloadStatusFilter,
         show_uninterested: showUninterestedLevel2Groups,
+        min_download_size_mb: Number.isFinite(minDownloadSizeMb) ? minDownloadSizeMb : 0,
+        max_download_size_mb: Number.isFinite(maxDownloadSizeMb) ? maxDownloadSizeMb : undefined,
       });
       setDedupeSummary(summary);
       setLevel2GroupDetails({})
@@ -429,7 +497,7 @@ export default function Dedupe() {
     } finally {
       setLoadingDedupe(false);
     }
-  }, [currentTask, level2DownloadStatusFilter, showUninterestedLevel2Groups]);
+  }, [currentTask, level2DownloadStatusFilter, showUninterestedLevel2Groups, appliedLevel2MinSizeMb, appliedLevel2MaxSizeMb]);
 
   const handleRunLevel2Dedupe = async () => {
     if (!currentTask) return;
@@ -467,13 +535,19 @@ export default function Dedupe() {
 
   const handleDownloadLevel2Group = async (fileId?: string | null) => {
     if (!currentTask || !fileId) return;
+    const targetGroup = dedupeSummary?.level2_groups.find((group) => group.download_target_file_id === fileId)
     try {
       const result = await apiClient.downloadMedia(currentTask.id, {
         file_id: fileId,
         download_all: false,
       });
+      if (targetGroup) {
+        updateLevel2GroupState(targetGroup.group_id, (group) => ({
+          ...group,
+          download_status: 'queued',
+        }))
+      }
       showNotification(`已加入下载队列 ${result.downloaded_count} 个文件`, 'success');
-      await fetchDedupeSummary(level2Page);
     } catch (err) {
       showNotification('加入下载失败', 'error');
     }
@@ -483,8 +557,22 @@ export default function Dedupe() {
     if (!currentTask) return
     try {
       await apiClient.setLevel2GroupInterest(currentTask.id, groupId, uninterested)
+      updateLevel2GroupState(groupId, (group) => {
+        const updatedGroup = {
+          ...group,
+          uninterested,
+        }
+
+        if (uninterested && !showUninterestedLevel2Groups) {
+          if (expandedLevel2Group === groupId) {
+            setExpandedLevel2Group(null)
+          }
+          return null
+        }
+
+        return updatedGroup
+      })
       showNotification(uninterested ? '已标记为不感兴趣' : '已取消不感兴趣', 'success')
-      await fetchDedupeSummary(level2Page)
     } catch (err) {
       showNotification(uninterested ? '设置不感兴趣失败' : '取消不感兴趣失败', 'error')
     }
@@ -517,6 +605,107 @@ export default function Dedupe() {
     } finally {
       setLoadingLevel2GroupId((current) => (current === groupId ? null : current))
     }
+  }
+
+  const applyLevel2SizeFilter = () => {
+    const normalizedMin = level2MinSizeMbInput.trim()
+    const normalizedMax = level2MaxSizeMbInput.trim()
+    setAppliedLevel2MinSizeMb(normalizedMin)
+    setAppliedLevel2MaxSizeMb(normalizedMax)
+    setLevel2Page(1)
+    setLevel2PageInputValue('1')
+  }
+
+  const renderLevel2Pagination = (placement: 'top' | 'bottom') => {
+    if (!dedupeSummary?.level2_pagination || dedupeSummary.level2_pagination.total_pages <= 1) {
+      return null
+    }
+
+    const level2Pagination = dedupeSummary.level2_pagination
+
+    return (
+      <Box
+        sx={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          gap: 2,
+          mt: placement === 'bottom' ? 3 : 0,
+          mb: placement === 'top' ? 2 : 0,
+          flexWrap: 'wrap',
+        }}
+      >
+        <Button
+          variant="outlined"
+          disabled={level2Page <= 1 || loadingDedupe}
+          onClick={() => fetchDedupeSummary(level2Page - 1)}
+          sx={{ borderRadius: 2 }}
+        >
+          上一页
+        </Button>
+        <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+          第 {level2Page} / {level2Pagination.total_pages} 页，
+          共 {level2Pagination.total} 个分组
+        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+            跳转到
+          </Typography>
+          <Box
+            component="input"
+            type="number"
+            min={1}
+            max={level2Pagination.total_pages}
+            value={level2PageInputValue}
+            onChange={(e) => {
+              setLevel2PageInputValue((e.target as HTMLInputElement).value)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const newPage = parseInt(level2PageInputValue) || 1
+                if (newPage >= 1 && newPage <= level2Pagination.total_pages) {
+                  fetchDedupeSummary(newPage)
+                } else {
+                  setLevel2PageInputValue(level2Page.toString())
+                }
+              }
+            }}
+            onBlur={() => {
+              const newPage = parseInt(level2PageInputValue) || 1
+              if (newPage >= 1 && newPage <= level2Pagination.total_pages) {
+                fetchDedupeSummary(newPage)
+              } else {
+                setLevel2PageInputValue(level2Page.toString())
+              }
+            }}
+            sx={{
+              width: '70px',
+              padding: '6px 8px',
+              borderRadius: '4px',
+              border: '1px solid #ccc',
+              fontSize: '14px',
+              textAlign: 'center',
+              '&:focus': {
+                outline: 'none',
+                borderColor: '#1976d2',
+                boxShadow: '0 0 0 2px rgba(25, 118, 210, 0.25)',
+              }
+            }}
+          />
+          <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+            页
+          </Typography>
+        </Box>
+        <Button
+          variant="outlined"
+          disabled={level2Page >= level2Pagination.total_pages || loadingDedupe}
+          onClick={() => fetchDedupeSummary(level2Page + 1)}
+          sx={{ borderRadius: 2 }}
+        >
+          下一页
+        </Button>
+      </Box>
+    )
   }
 
   // 当当前任务变化时，获取去重汇总
@@ -1142,6 +1331,36 @@ export default function Dedupe() {
                   </Select>
                 </FormControl>
 
+                <TextField
+                  label="最小大小(MB)"
+                  size="small"
+                  type="number"
+                  value={level2MinSizeMbInput}
+                  onChange={(e) => setLevel2MinSizeMbInput(e.target.value)}
+                  onBlur={applyLevel2SizeFilter}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      applyLevel2SizeFilter()
+                    }
+                  }}
+                  sx={{ width: 140 }}
+                />
+
+                <TextField
+                  label="最大大小(MB)"
+                  size="small"
+                  type="number"
+                  value={level2MaxSizeMbInput}
+                  onChange={(e) => setLevel2MaxSizeMbInput(e.target.value)}
+                  onBlur={applyLevel2SizeFilter}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      applyLevel2SizeFilter()
+                    }
+                  }}
+                  sx={{ width: 140 }}
+                />
+
                 <Button
                   variant="outlined"
                   onClick={() => {
@@ -1207,6 +1426,7 @@ export default function Dedupe() {
                       <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 2 }}>
                         相似媒体分组
                       </Typography>
+                      {renderLevel2Pagination('top')}
                       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                         {dedupeSummary.level2_groups.map((level2Group) => {
                           const detailGroup = level2GroupDetails[level2Group.group_id]
@@ -1421,79 +1641,7 @@ export default function Dedupe() {
                           </Accordion>
                         )})}
                       </Box>
-                      {dedupeSummary.level2_pagination && dedupeSummary.level2_pagination.total_pages > 1 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, mt: 3, flexWrap: 'wrap' }}>
-                          <Button
-                            variant="outlined"
-                            disabled={level2Page <= 1 || loadingDedupe}
-                            onClick={() => fetchDedupeSummary(level2Page - 1)}
-                            sx={{ borderRadius: 2 }}
-                          >
-                            上一页
-                          </Button>
-                          <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                            第 {level2Page} / {dedupeSummary.level2_pagination.total_pages} 页，
-                            共 {dedupeSummary.level2_pagination.total} 个分组
-                          </Typography>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                              跳转到
-                            </Typography>
-                            <Box
-                              component="input"
-                              type="number"
-                              min={1}
-                              max={dedupeSummary.level2_pagination.total_pages}
-                              value={level2PageInputValue}
-                              onChange={(e) => {
-                                setLevel2PageInputValue((e.target as HTMLInputElement).value)
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  const newPage = parseInt(level2PageInputValue) || 1
-                                  if (newPage >= 1 && newPage <= dedupeSummary.level2_pagination!.total_pages) {
-                                    fetchDedupeSummary(newPage)
-                                  } else {
-                                    setLevel2PageInputValue(level2Page.toString())
-                                  }
-                                }
-                              }}
-                              onBlur={() => {
-                                const newPage = parseInt(level2PageInputValue) || 1
-                                if (newPage >= 1 && newPage <= dedupeSummary.level2_pagination!.total_pages) {
-                                  fetchDedupeSummary(newPage)
-                                } else {
-                                  setLevel2PageInputValue(level2Page.toString())
-                                }
-                              }}
-                              sx={{
-                                width: '70px',
-                                padding: '6px 8px',
-                                borderRadius: '4px',
-                                border: '1px solid #ccc',
-                                fontSize: '14px',
-                                textAlign: 'center',
-                                '&:focus': {
-                                  outline: 'none',
-                                  borderColor: '#1976d2',
-                                  boxShadow: '0 0 0 2px rgba(25, 118, 210, 0.25)',
-                                }
-                              }}
-                            />
-                            <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                              页
-                            </Typography>
-                          </Box>
-                          <Button
-                            variant="outlined"
-                            disabled={level2Page >= dedupeSummary.level2_pagination.total_pages || loadingDedupe}
-                            onClick={() => fetchDedupeSummary(level2Page + 1)}
-                            sx={{ borderRadius: 2 }}
-                          >
-                            下一页
-                          </Button>
-                        </Box>
-                      )}
+                      {renderLevel2Pagination('bottom')}
                     </Box>
                   ) : (
                     /* 如果没有第二层去重结果，只显示第一层结果 */

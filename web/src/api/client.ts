@@ -158,6 +158,8 @@ export const apiClient = {
       level2_limit?: number;
       download_status?: string;
       show_uninterested?: boolean;
+      min_download_size_mb?: number;
+      max_download_size_mb?: number;
     }
   ): Promise<TwoLevelDedupeSummary> {
     const response = await api.get(`/dedupe/tasks/${taskId}/dedupe/summary`, { params });

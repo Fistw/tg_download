@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.deduplicator import Deduplicator
@@ -173,6 +174,40 @@ class TestDeduplicator:
                     assert count == 1
                     mock_client.get_messages.assert_called_once_with(12345, ids=100)
                     mock_download.assert_called_once()
+        finally:
+            db.close()
+
+    @pytest.mark.asyncio
+    async def test_download_media_runs_cache_cleanup(self, tmp_path):
+        """去重下载成功后应触发缓存清理。"""
+        db = DownloadDB(tmp_path / "test.db")
+        try:
+            mock_client = AsyncMock()
+            mock_message = MagicMock()
+            mock_client.get_messages.return_value = mock_message
+            output_dir = tmp_path / "output"
+            config = SimpleNamespace(
+                enable_cache_cleanup=True,
+                cache_retention_days=3,
+                max_cache_size_gb=8.0,
+            )
+
+            deduplicator = Deduplicator(mock_client, db, download_config=config)
+            task_id = deduplicator.create_task(chat_id=12345)
+            db.add_dedupe_media(task_id, file_id="test_file", first_seen_message_id=100)
+
+            with patch("src.deduplicator.download_message", new_callable=AsyncMock) as mock_download:
+                with patch("src.deduplicator._is_video", return_value=True):
+                    with patch("src.deduplicator.cleanup_cache") as mock_cleanup:
+                        mock_download.return_value = output_dir / "downloaded_file.mp4"
+
+                        assert await deduplicator.download_single_media(
+                            task_id,
+                            output_dir=output_dir,
+                            file_id="test_file",
+                        )
+
+                        mock_cleanup.assert_called_once_with(output_dir, 3, 8.0)
         finally:
             db.close()
     
