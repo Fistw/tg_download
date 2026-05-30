@@ -16,6 +16,7 @@ venv/
 .pytest_cache/
 
 downloads.db
+monitoring.db
 .trae/
 data/
 backups/

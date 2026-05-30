@@ -5,6 +5,8 @@ import json
 import logging
 import mimetypes
 import os
+import http.client
+import socketserver
 import threading
 import time
 import urllib.parse
@@ -26,6 +28,14 @@ except ImportError:
 from .config import WebDAVServerConfig
 
 logger = logging.getLogger(__name__)
+
+
+class ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
+    """WSGI server that isolates slow clients in separate worker threads."""
+
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 128
 
 # 全局监控实例
 _monitoring_db = None
@@ -1089,9 +1099,13 @@ class WebDAVServer:
 
         return config
 
+    def _get_health_check_port(self) -> int:
+        if self._httpd:
+            return int(self._httpd.server_address[1])
+        return self.config.port
+
     def _run_health_check(self):
-        """运行健康检查 - 通过 socket 直接检查端口"""
-        import socket
+        """运行健康检查 - 请求 /health，确认应用线程能正常响应。"""
         logger.info(f"健康检查线程启动，_monitoring_db={_monitoring_db}")
         
         # 先等 10 秒，让服务器完全启动
@@ -1105,19 +1119,24 @@ class WebDAVServer:
         while not self._stop_event.is_set():
             try:
                 start_time = time.time()
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(self.config.health_check_timeout)
-                result = sock.connect_ex(('127.0.0.1', self.config.port))
-                sock.close()
-                
-                if result == 0:
+                conn = None
+                conn = http.client.HTTPConnection(
+                    "127.0.0.1",
+                    self._get_health_check_port(),
+                    timeout=self.config.health_check_timeout,
+                )
+                conn.request("GET", "/health")
+                response = conn.getresponse()
+                body = response.read()
+                conn.close()
+
+                if response.status == 200 and body == b"OK":
                     response_time = (time.time() - start_time) * 1000
                     consecutive_failures = 0
                     self._failure_count = 0
                     if _monitoring_db:
                         try:
                             _monitoring_db.record_health_check("success", response_time)
-                            # 减少日志噪音，只记录调试信息
                             logger.debug(f"健康检查成功，已记录")
                         except Exception as record_err:
                             logger.error(f"记录健康检查失败: {record_err}")
@@ -1125,36 +1144,26 @@ class WebDAVServer:
                         logger.debug(f"健康检查成功，_monitoring_db 未设置，不记录")
                     logger.debug(f"健康检查成功，响应时间: {response_time:.2f}ms")
                 else:
-                    raise Exception(f"Socket connection failed, result={result}")
+                    raise RuntimeError(f"GET /health returned {response.status}: {body!r}")
             except Exception as e:
+                if conn:
+                    conn.close()
                 response_time = (time.time() - start_time) * 1000
                 error_msg = str(e)
-                
-                # 对于常见的临时错误（如资源暂时不可用），降低日志级别
-                is_temporary_error = '11' in error_msg or 'EAGAIN' in error_msg or 'EWOULDBLOCK' in error_msg
-                
-                if is_temporary_error:
-                    logger.debug(f"健康检查遇到临时错误: {error_msg}")
-                else:
-                    logger.warning(f"健康检查失败: {error_msg}")
+                logger.warning(f"健康检查失败: {error_msg}")
                 
                 consecutive_failures += 1
                 self._failure_count = consecutive_failures
                 
                 if _monitoring_db:
                     try:
-                        # 临时错误标记为 warning 而不是 failed
-                        status = "warning" if is_temporary_error else "failed"
-                        _monitoring_db.record_health_check(status, response_time, error_msg)
+                        _monitoring_db.record_health_check("failed", response_time, error_msg)
                     except Exception as record_err:
                         logger.error(f"记录健康检查失败: {record_err}")
                 
-                # 只有真正的失败（非临时错误）才计入恢复机制
-                if not is_temporary_error:
-                    logger.warning(f"真实健康检查失败 ({consecutive_failures}/{self.config.health_check_failure_threshold}): {error_msg}")
-                    # 检查是否需要触发恢复
-                    if consecutive_failures >= self.config.health_check_failure_threshold:
-                        self._attempt_recovery()
+                logger.warning(f"真实健康检查失败 ({consecutive_failures}/{self.config.health_check_failure_threshold}): {error_msg}")
+                if consecutive_failures >= self.config.health_check_failure_threshold:
+                    self._attempt_recovery()
             
             # 等待下一次检查
             self._stop_event.wait(self.config.health_check_interval)
@@ -1183,9 +1192,10 @@ class WebDAVServer:
         # 停止服务器和主线程
         self.stop()
         
-        # 退出进程让 systemd 重启
-        import sys
-        sys.exit(1)
+        # 健康检查运行在子线程中，sys.exit() 只会退出当前线程。
+        # 这里必须退出整个进程，才能让 systemd 的 Restart=always 接管。
+        logging.shutdown()
+        os._exit(1)
 
     def _cleanup_stuck_tasks(self):
         """清理卡住的任务（比如状态是 scanning 但实际上不在运行的）"""
@@ -1241,16 +1251,18 @@ class WebDAVServer:
                 self._health_check_thread.start()
                 logger.info(f"健康检查已启用，间隔: {self.config.health_check_interval}秒")
 
+            server_backlog = max(1, int(self.config.server_backlog))
+
+            class ConfiguredThreadingWSGIServer(ThreadingWSGIServer):
+                request_queue_size = server_backlog
+
             # 创建服务器
             self._httpd = make_server(
                 self.config.host,
                 self.config.port,
                 combined_app,
-                server_class=WSGIServer
+                server_class=ConfiguredThreadingWSGIServer
             )
-            # 设置 backlog
-            if hasattr(self._httpd, 'request_queue_size'):
-                self._httpd.request_queue_size = self.config.server_backlog
 
             logger.info(f"服务器启动在 http://{self.config.host}:{self.config.port}")
             logger.info(f"监控看板: http://{self.config.host}:{self.config.port}/dashboard")

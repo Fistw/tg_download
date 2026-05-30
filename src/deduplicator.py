@@ -453,6 +453,19 @@ class Deduplicator:
 
         return downloaded_count
 
+    def run_level1_dedupe(self, task_id: int) -> int:
+        """Group task media by file_id for the first dedupe level."""
+        media_list, _ = self._db.get_dedupe_media_list(task_id, limit=10000)
+        group_count = 0
+
+        for media in media_list:
+            media_id = media["id"]
+            group_id = media["file_id"]
+            self._db.add_dedupe_level1(task_id, group_id, media_id, [media_id])
+            group_count += 1
+
+        return group_count
+
     async def download_single_media(
         self,
         task_id: int,

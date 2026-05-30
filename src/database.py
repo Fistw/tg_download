@@ -19,6 +19,7 @@ class DownloadDB:
 
     def __init__(self, db_path: str | Path = "downloads.db", thumbnail_dir: str | Path = "thumbnails") -> None:
         self.db_path = Path(db_path)
+        self._closed = False
         # 确保目录存在
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # 初始化缩略图存储
@@ -27,6 +28,8 @@ class DownloadDB:
     
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接"""
+        if self._closed:
+            raise RuntimeError("数据库已关闭")
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
@@ -135,13 +138,15 @@ class DownloadDB:
         if "retry_count" not in columns:
             conn.execute("ALTER TABLE downloads ADD COLUMN retry_count INTEGER DEFAULT 0")
 
+        legacy_timestamp = "downloaded_at" if "downloaded_at" in columns else "CURRENT_TIMESTAMP"
+
         # 为历史数据回填缺失字段，避免旧库升级后新逻辑读到 NULL。
-        conn.execute("""
+        conn.execute(f"""
             UPDATE downloads
             SET status = COALESCE(status, 'completed'),
                 source = COALESCE(source, 'legacy'),
-                created_at = COALESCE(created_at, downloaded_at, CURRENT_TIMESTAMP),
-                updated_at = COALESCE(updated_at, downloaded_at, created_at, CURRENT_TIMESTAMP),
+                created_at = COALESCE(created_at, {legacy_timestamp}, CURRENT_TIMESTAMP),
+                updated_at = COALESCE(updated_at, {legacy_timestamp}, created_at, CURRENT_TIMESTAMP),
                 downloaded_bytes = COALESCE(downloaded_bytes, 0),
                 retry_count = COALESCE(retry_count, 0)
         """)
@@ -2060,8 +2065,8 @@ class DownloadDB:
                 conn.close()
 
     def close(self) -> None:
-        """关闭数据库连接。这里不需要操作，因为我们每次都创建新连接。"""
-        pass
+        """标记数据库为已关闭，阻止后续操作。"""
+        self._closed = True
 
 
 # 兼容旧代码
