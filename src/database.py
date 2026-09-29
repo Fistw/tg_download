@@ -368,6 +368,10 @@ class DownloadDB:
         total_bytes: Optional[int] = None,
     ) -> int:
         """创建任务，返回 id。已完成返回 -1，失败则重置为 queued。"""
+        # 兼容旧版数据库：历史表可能要求 filename NOT NULL。
+        # 在真正下载完成前允许先写入空字符串占位，后续再 update_status 覆盖。
+        safe_filename = filename if filename is not None else ""
+
         with _db_lock:
             conn = self._get_connection()
             try:
@@ -390,7 +394,7 @@ class DownloadDB:
                     "INSERT INTO downloads "
                     "(channel, message_id, source, filename, file_size, total_bytes, status, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                    (channel, message_id, source, filename, file_size, total_bytes),
+                    (channel, message_id, source, safe_filename, file_size, total_bytes),
                 )
                 conn.commit()
                 return cur.lastrowid  # type: ignore[return-value]

@@ -576,7 +576,8 @@ async def start_reaction_monitor(client: TelegramClient, config: AppConfig, down
                 logger.debug(f"Received callback query: {callback_data}")
 
                 if callback_data not in _callback_tasks:
-                    await event.answer("❌ 该操作已过期或无效")
+                    if callback_data.startswith("dl_"):
+                        await event.answer("❌ 该操作已过期或无效")
                     return
 
                 user_id, should_send_event, downloaded_paths = _callback_tasks[callback_data]

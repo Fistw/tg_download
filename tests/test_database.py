@@ -44,6 +44,44 @@ class TestCreateAndGetTask:
         finally:
             db.close()
 
+    def test_create_task_works_with_legacy_not_null_filename_schema(self, tmp_path):
+        db_path = tmp_path / "legacy.db"
+        legacy = DownloadHistory(db_path)
+        try:
+            conn = legacy._get_connection()
+            conn.execute("DROP TABLE downloads")
+            conn.execute(
+                """
+                CREATE TABLE downloads (
+                    id INTEGER PRIMARY KEY,
+                    channel TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    filename TEXT NOT NULL,
+                    file_size INTEGER,
+                    downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(channel, message_id)
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+            legacy.close()
+
+            db = DownloadDB(db_path)
+            try:
+                task_id = db.create_task("chan", 1, source="bot")
+                task = db.get_task("chan", 1)
+                assert task_id >= 1
+                assert task["filename"] == ""
+                assert task["status"] == "queued"
+            finally:
+                db.close()
+        finally:
+            try:
+                legacy.close()
+            except Exception:
+                pass
+
 
 class TestUpdateStatus:
     def test_update_status(self, tmp_path):

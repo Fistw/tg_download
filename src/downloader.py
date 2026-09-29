@@ -24,6 +24,20 @@ DEFAULT_RETRY_BASE_DELAY = 1.0
 DEFAULT_RETRY_MAX_DELAY = 60.0
 
 
+async def _get_message_by_entity(client: TelegramClient, entity, message_id: int):
+    """稳健地按实体获取单条消息。
+
+    某些公开/私有频道链接在实体未缓存时，直接调用 get_messages
+    可能会拿不到消息，因此这里会补一次 get_entity 解析后的重试。
+    """
+    message = await client.get_messages(entity, ids=message_id)
+    if message is not None:
+        return message
+
+    resolved_entity = await client.get_entity(entity)
+    return await client.get_messages(resolved_entity, ids=message_id)
+
+
 @dataclass
 class VideoMetadata:
     """视频元数据，包含发送视频所需的信息"""
@@ -396,7 +410,7 @@ async def download_by_link(
     parsed = parse_telegram_link(link)
     channel = parsed.channel
 
-    # 处理私有频道 ID
+    # 处理私有频道 ID。普通消息先直接取，失败时再做实体解析回退。
     entity = int(channel) if channel.lstrip("-").isdigit() else channel
 
     # 如果是评论消息，需要从讨论组频道中获取
@@ -418,9 +432,9 @@ async def download_by_link(
             discussion_chat_id = full_channel.full_chat.linked_chat_id
             entity = int(f"-100{discussion_chat_id}")
             # 显式获取讨论组实体，确保它被缓存
-            await client.get_entity(entity)
+            entity = await client.get_entity(entity)
 
-    message = await client.get_messages(entity, ids=parsed.message_id)
+    message = await _get_message_by_entity(client, entity, parsed.message_id)
 
     if message is None:
         raise RuntimeError(f"无法获取消息: {link}")

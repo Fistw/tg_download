@@ -123,6 +123,7 @@ class TestDownloadByLink:
         client = AsyncMock()
         msg = _make_video_message(msg_id=123)
         msg.get_input_chat = AsyncMock(return_value=MagicMock(username="testchan"))
+        client.get_entity = AsyncMock()
         client.get_messages = AsyncMock(return_value=msg)
 
         out_file = tmp_path / "testchan_123_test.mp4"
@@ -135,10 +136,37 @@ class TestDownloadByLink:
         )
 
         client.get_messages.assert_awaited_once_with("testchan", ids=123)
+        client.get_entity.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_download_by_link_retries_after_resolving_entity_when_message_missing(self, tmp_path):
+        client = AsyncMock()
+        msg = _make_video_message(msg_id=123)
+        msg.get_input_chat = AsyncMock(return_value=MagicMock(username="testchan"))
+        resolved_entity = MagicMock()
+        client.get_entity = AsyncMock(return_value=resolved_entity)
+        client.get_messages = AsyncMock(side_effect=[None, msg])
+
+        out_file = tmp_path / "testchan_123_test.mp4"
+        client.iter_download = _mock_iter_download()
+        out_file.touch()
+
+        result = await download_by_link(
+            client, "https://t.me/testchan/123", str(tmp_path)
+        )
+
+        assert result is not None
+        assert client.get_messages.await_args_list[0].args == ("testchan",)
+        assert client.get_messages.await_args_list[0].kwargs == {"ids": 123}
+        assert client.get_messages.await_args_list[1].args == (resolved_entity,)
+        assert client.get_messages.await_args_list[1].kwargs == {"ids": 123}
+        client.get_entity.assert_awaited_once_with("testchan")
 
     @pytest.mark.asyncio
     async def test_download_by_link_none_message_raises(self):
         client = AsyncMock()
+        resolved_entity = MagicMock()
+        client.get_entity = AsyncMock(return_value=resolved_entity)
         client.get_messages = AsyncMock(return_value=None)
 
         with pytest.raises(RuntimeError, match="无法获取消息"):

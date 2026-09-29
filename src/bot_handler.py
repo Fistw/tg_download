@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Tuple
 
-from telethon import TelegramClient, events
+try:
+    from telethon import TelegramClient, events, Button
+    BUTTON_AVAILABLE = True
+except ImportError:
+    from telethon import TelegramClient, events
+    BUTTON_AVAILABLE = False
 
 from .config import AppConfig
 from .downloader import download_by_link, DownloadResult, VideoMetadata
@@ -13,6 +19,9 @@ from .utils import parse_telegram_link, format_file_size
 from .cache import cleanup_cache
 
 logger = logging.getLogger(__name__)
+
+_pending_send_text_confirmations: Dict[int, Tuple[int, asyncio.Future[bool]]] = {}
+_pending_send_callbacks: Dict[str, Tuple[int, asyncio.Future[bool]]] = {}
 
 
 def _is_allowed(user_id: int, allowed_users: list[int]) -> bool:
@@ -149,6 +158,57 @@ async def _send_video_with_metadata(
                 pass
 
 
+async def _request_send_confirmation(
+    bot_client: TelegramClient,
+    user_id: int,
+    message_id: int,
+    timeout_seconds: int,
+) -> bool:
+    """询问用户是否发送下载好的文件。"""
+    if BUTTON_AVAILABLE:
+        callback_send = f"botdl_{user_id}_{message_id}_send"
+        question_msg = await bot_client.send_message(
+            user_id,
+            "✅ 下载完成！\n\n是否发送文件给你？",
+            buttons=[Button.inline("📤 发送", data=callback_send)]
+        )
+
+        should_send_future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        _pending_send_callbacks[callback_send] = (user_id, should_send_future)
+        try:
+            return await asyncio.wait_for(should_send_future, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            try:
+                await bot_client.edit_message(
+                    user_id,
+                    question_msg.id,
+                    "✅ 下载完成！\n\n(⏰ 已超时，默认不发送)",
+                    buttons=None,
+                )
+            except Exception as e:
+                logger.warning(f"编辑确认消息失败: {e}")
+            return False
+        finally:
+            _pending_send_callbacks.pop(callback_send, None)
+
+    question_msg = await bot_client.send_message(
+        user_id,
+        "✅ 下载完成！\n\n是否发送文件？\n"
+        "- \"是\" 或 \"y\" 发送\n- \"否\" 或 \"n\" 不发送\n\n"
+        f"({timeout_seconds} 秒后默认不发送)"
+    )
+
+    should_send_future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    _pending_send_text_confirmations[user_id] = (question_msg.id, should_send_future)
+    try:
+        return await asyncio.wait_for(should_send_future, timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        await bot_client.send_message(user_id, "⏰ 超时，默认不发送文件。")
+        return False
+    finally:
+        _pending_send_text_confirmations.pop(user_id, None)
+
+
 async def setup_bot_handlers(
     bot_client: TelegramClient,
     user_client: TelegramClient,
@@ -167,14 +227,14 @@ async def setup_bot_handlers(
             await event.reply(f"无效的链接: {link}")
             return
 
-        if history:
-            task_id = history.create_task(parsed.channel, parsed.message_id, source="bot")
-            if task_id == -1:
-                await event.reply("该视频已下载过，跳过")
-                return
-            history.update_status(parsed.channel, parsed.message_id, "downloading")
-
         try:
+            if history:
+                task_id = history.create_task(parsed.channel, parsed.message_id, source="bot")
+                if task_id == -1:
+                    await event.reply("该视频已下载过，跳过")
+                    return
+                history.update_status(parsed.channel, parsed.message_id, "downloading")
+
             result = await download_by_link(user_client, link, output_dir)
             if result is None:
                 await event.reply("该消息不包含视频内容")
@@ -194,6 +254,17 @@ async def setup_bot_handlers(
                 history.update_status(parsed.channel, parsed.message_id, "completed", filename=file_path.name, file_size=file_size)
 
             if file_path.exists() and file_path.stat().st_size < 2 * 1024 ** 3:
+                if config.download.ask_before_send:
+                    should_send = await _request_send_confirmation(
+                        bot_client,
+                        event.chat_id,
+                        parsed.message_id,
+                        config.download.ask_timeout_seconds,
+                    )
+                    if not should_send:
+                        await event.reply("下载完成，未发送文件。")
+                        return
+
                 await event.reply("下载完成，正在发送文件...")
                 await _send_video_with_metadata(bot_client, event.chat_id, result, config.download)
             else:
@@ -216,6 +287,48 @@ async def setup_bot_handlers(
             "/clean_cache — 清理本地缓存视频\n"
             "/clean_cache --dry-run — 预览清理而不删除\n"
         )
+
+    @bot_client.on(events.NewMessage())
+    async def on_confirmation_reply(event):
+        pending = _pending_send_text_confirmations.get(event.sender_id)
+        if pending is None:
+            return
+
+        text = (event.raw_text or "").strip().lower()
+        if text in {"是", "y", "yes"}:
+            _, should_send_future = pending
+            if not should_send_future.done():
+                should_send_future.set_result(True)
+            await event.reply("✅ 已收到，开始发送文件。")
+        elif text in {"否", "n", "no"}:
+            _, should_send_future = pending
+            if not should_send_future.done():
+                should_send_future.set_result(False)
+            await event.reply("已取消发送。")
+
+    @bot_client.on(events.CallbackQuery())
+    async def on_send_confirmation_callback(event):
+        callback_data = event.data.decode() if event.data else ""
+        if not callback_data.startswith("botdl_"):
+            return
+
+        if callback_data not in _pending_send_callbacks:
+            await event.answer("❌ 该操作已过期或无效")
+            return
+
+        user_id, should_send_future = _pending_send_callbacks[callback_data]
+        if event.sender_id != user_id:
+            await event.answer("❌ 你没有权限执行此操作")
+            return
+
+        try:
+            await event.edit("✅ 下载完成！\n\n📤 正在发送文件...", buttons=None)
+        except Exception as e:
+            logger.warning(f"编辑确认消息失败: {e}")
+
+        await event.answer("✅ 已收到！正在发送...")
+        if not should_send_future.done():
+            should_send_future.set_result(True)
 
     @bot_client.on(events.NewMessage(pattern=r"/download\s+(.+)"))
     async def on_download(event):
