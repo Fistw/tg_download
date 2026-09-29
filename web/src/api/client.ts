@@ -2,6 +2,7 @@ import axios from 'axios';
 import type {
   DashboardStats,
   DownloadItem,
+  ForwardedVideoBatch,
   UploadItem,
   RecoveryItem,
   ChatInfo,
@@ -62,6 +63,11 @@ export const apiClient = {
 
   async getDownloads(): Promise<DownloadItem[]> {
     const response = await api.get('/downloads');
+    return response.data;
+  },
+
+  async getForwardedVideoBatches(): Promise<ForwardedVideoBatch[]> {
+    const response = await api.get('/forwarded-video-tasks');
     return response.data;
   },
 

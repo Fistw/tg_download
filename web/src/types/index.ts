@@ -6,6 +6,19 @@ export interface DownloadItem {
   created_at: string;
 }
 
+export interface ForwardedVideoBatch {
+  id: number;
+  batch_type: 'single' | 'album';
+  chat_id: number | null;
+  sender_id: number | null;
+  total_videos: number;
+  downloaded_count: number;
+  failed_count: number;
+  status: 'downloading' | 'completed' | 'partially_failed' | 'failed' | 'interrupted';
+  created_at: string;
+  updated_at: string;
+}
+
 export interface UploadItem {
   filename: string;
   file_size_bytes: number;

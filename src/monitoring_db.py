@@ -28,6 +28,7 @@ class MonitoringDB:
 
     def _initialize_db(self) -> None:
         """初始化数据库表"""
+        retention_cutoff = (datetime.now() - timedelta(days=self.retention_days)).isoformat()
         with _db_lock:
             conn = self._get_connection()
             try:
@@ -40,6 +41,20 @@ class MonitoringDB:
                         downloaded_bytes INTEGER DEFAULT 0,
                         speed_kb_s REAL DEFAULT 0,
                         status TEXT DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS forwarded_video_batches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        batch_type TEXT NOT NULL,
+                        chat_id INTEGER,
+                        sender_id INTEGER,
+                        total_videos INTEGER NOT NULL,
+                        downloaded_count INTEGER NOT NULL DEFAULT 0,
+                        failed_count INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -86,6 +101,10 @@ class MonitoringDB:
                     CREATE INDEX IF NOT EXISTS idx_dl_created ON download_metrics(created_at)
                 """)
                 conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_forwarded_video_batches_created
+                    ON forwarded_video_batches(created_at)
+                """)
+                conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_ul_created ON upload_metrics(created_at)
                 """)
                 conn.execute("""
@@ -96,6 +115,15 @@ class MonitoringDB:
                 """)
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_rec_created ON recovery_history(created_at)
+                """)
+                conn.execute(
+                    "DELETE FROM forwarded_video_batches WHERE created_at < ?",
+                    (retention_cutoff,),
+                )
+                conn.execute("""
+                    UPDATE forwarded_video_batches
+                    SET status='interrupted', updated_at=CURRENT_TIMESTAMP
+                    WHERE status='downloading'
                 """)
                 conn.commit()
             finally:
@@ -111,6 +139,7 @@ class MonitoringDB:
             conn = self._get_connection()
             try:
                 conn.execute("DELETE FROM download_metrics WHERE created_at < ?", (cutoff_str,))
+                conn.execute("DELETE FROM forwarded_video_batches WHERE created_at < ?", (cutoff_str,))
                 conn.execute("DELETE FROM upload_metrics WHERE created_at < ?", (cutoff_str,))
                 conn.execute("DELETE FROM system_metrics WHERE created_at < ?", (cutoff_str,))
                 conn.execute("DELETE FROM health_checks WHERE created_at < ?", (cutoff_str,))
@@ -200,6 +229,67 @@ class MonitoringDB:
                     ORDER BY created_at DESC
                     LIMIT ?
                 """, (cutoff_str, limit))
+                return [dict(row) for row in cursor.fetchall()]
+            finally:
+                conn.close()
+
+    def start_forwarded_video_batch(
+        self, batch_type: str, chat_id: int, sender_id: int, total_videos: int
+    ) -> int:
+        """开始记录 Bot 收到的转发视频批次。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO forwarded_video_batches
+                    (batch_type, chat_id, sender_id, total_videos, status)
+                    VALUES (?, ?, ?, ?, 'downloading')
+                    """,
+                    (batch_type, chat_id, sender_id, total_videos),
+                )
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+
+    def update_forwarded_video_batch(
+        self, batch_id: int, downloaded_count: int, failed_count: int, status: str
+    ) -> None:
+        """更新转发视频批次的统计和状态。"""
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """
+                    UPDATE forwarded_video_batches
+                    SET downloaded_count=?, failed_count=?, status=?, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (downloaded_count, failed_count, status, batch_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_forwarded_video_batches(self, days: int = 7, limit: int = 100) -> list[dict]:
+        """获取指定保留期内最近的转发视频批次。"""
+        cutoff = datetime.now() - timedelta(days=min(days, self.retention_days))
+        cutoff_str = cutoff.isoformat()
+        with _db_lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT id, batch_type, chat_id, sender_id, total_videos,
+                           downloaded_count, failed_count, status, created_at, updated_at
+                    FROM forwarded_video_batches
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (cutoff_str, limit),
+                )
                 return [dict(row) for row in cursor.fetchall()]
             finally:
                 conn.close()

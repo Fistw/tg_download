@@ -15,7 +15,7 @@ import {
 } from '@mui/material'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import { apiClient } from '../api/client'
-import type { DownloadItem } from '../types'
+import type { DownloadItem, ForwardedVideoBatch } from '../types'
 
 function formatFileSize(bytes: number): string {
   if (!bytes) return '-'
@@ -50,19 +50,60 @@ function getStatusColor(status: string): 'success' | 'warning' | 'error' | 'defa
   }
 }
 
+function getBatchStatusLabel(status: ForwardedVideoBatch['status']): string {
+  switch (status) {
+    case 'downloading':
+      return '下载中'
+    case 'completed':
+      return '已完成'
+    case 'partially_failed':
+      return '部分失败'
+    case 'failed':
+      return '失败'
+    case 'interrupted':
+      return '已中断'
+  }
+}
+
+function getBatchStatusColor(
+  status: ForwardedVideoBatch['status']
+): 'success' | 'warning' | 'error' | 'default' {
+  switch (status) {
+    case 'completed':
+      return 'success'
+    case 'downloading':
+    case 'partially_failed':
+      return 'warning'
+    case 'failed':
+    case 'interrupted':
+      return 'error'
+  }
+}
+
 export default function Downloads() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([])
+  const [forwardedBatches, setForwardedBatches] = useState<ForwardedVideoBatch[]>([])
   const [loading, setLoading] = useState(true)
 
   const fetchData = async () => {
-    try {
-      const data = await apiClient.getDownloads()
-      setDownloads(data)
-    } catch (err) {
-      console.error('Error fetching downloads:', err)
-    } finally {
-      setLoading(false)
+    const [downloadsResult, batchesResult] = await Promise.allSettled([
+      apiClient.getDownloads(),
+      apiClient.getForwardedVideoBatches(),
+    ])
+
+    if (downloadsResult.status === 'fulfilled') {
+      setDownloads(downloadsResult.value)
+    } else {
+      console.error('Error fetching downloads:', downloadsResult.reason)
     }
+
+    if (batchesResult.status === 'fulfilled') {
+      setForwardedBatches(batchesResult.value)
+    } else {
+      console.error('Error fetching forwarded video batches:', batchesResult.reason)
+    }
+
+    setLoading(false)
   }
 
   useEffect(() => {
@@ -91,6 +132,58 @@ export default function Downloads() {
           刷新
         </Button>
       </Box>
+
+      <Paper elevation={1} sx={{ borderRadius: 3, p: 3, mb: 3 }}>
+        <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+          Bot 转发视频任务
+        </Typography>
+        {loading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+            <CircularProgress size={28} />
+          </Box>
+        ) : forwardedBatches.length === 0 ? (
+          <Typography variant="body2" sx={{ color: 'text.secondary', py: 2 }}>
+            暂无转发视频任务
+          </Typography>
+        ) : (
+          <TableContainer>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>任务类型</TableCell>
+                  <TableCell>开始时间</TableCell>
+                  <TableCell align="right">进度</TableCell>
+                  <TableCell align="right">失败数</TableCell>
+                  <TableCell align="right">状态</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {forwardedBatches.map((batch) => (
+                  <TableRow key={batch.id} hover>
+                    <TableCell>{batch.batch_type === 'album' ? '相册' : '单条视频'}</TableCell>
+                    <TableCell>
+                      <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                        {new Date(batch.created_at).toLocaleString('zh-CN')}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">
+                      {batch.downloaded_count}/{batch.total_videos}
+                    </TableCell>
+                    <TableCell align="right">{batch.failed_count}</TableCell>
+                    <TableCell align="right">
+                      <Chip
+                        label={getBatchStatusLabel(batch.status)}
+                        color={getBatchStatusColor(batch.status)}
+                        size="small"
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
+      </Paper>
 
       <Paper elevation={1} sx={{ borderRadius: 3, p: 3 }}>
         {loading ? (

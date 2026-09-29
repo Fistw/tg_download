@@ -19,7 +19,7 @@
 
 Create `forwarded_video_batches` in `_initialize_db` with fields: `id INTEGER PRIMARY KEY AUTOINCREMENT`, `batch_type TEXT NOT NULL`, `chat_id INTEGER`, `sender_id INTEGER`, `total_videos INTEGER NOT NULL`, `downloaded_count INTEGER NOT NULL DEFAULT 0`, `failed_count INTEGER NOT NULL DEFAULT 0`, `status TEXT NOT NULL`, `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`, and `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`. Add an index on `created_at`.
 
-At the end of initialization, change leftover `status='downloading'` records to `status='interrupted'` and refresh `updated_at`. Do not reset progress or automatically retry them. Include the table in `cleanup_old_data` using the same `retention_days` cutoff as other monitoring records.
+At initialization, delete records older than `retention_days`, then change leftover `status='downloading'` records to `status='interrupted'` and refresh `updated_at`. Do not reset progress or automatically retry them. Include the table in `cleanup_old_data` using the same cutoff as other monitoring records.
 
 - [ ] **Step 2: Add exact batch APIs**
 
@@ -40,7 +40,7 @@ def get_forwarded_video_batches(self, days: int = 7, limit: int = 100) -> list[d
     """Return recent batch summaries newest first."""
 ```
 
-`start_forwarded_video_batch` inserts `status='downloading'`. The list query returns `id`, `batch_type`, `chat_id`, `sender_id`, `total_videos`, `downloaded_count`, `failed_count`, `status`, `created_at`, and `updated_at`; it deletes records older than `retention_days`, filters to the requested cutoff, and applies the limit.
+`start_forwarded_video_batch` inserts `status='downloading'`. The list query returns `id`, `batch_type`, `chat_id`, `sender_id`, `total_videos`, `downloaded_count`, `failed_count`, `status`, `created_at`, and `updated_at`; it filters to the requested cutoff and applies the limit without mutating stored data.
 
 ### Task 2: Update persistent state while the Bot downloads
 

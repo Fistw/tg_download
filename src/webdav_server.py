@@ -108,6 +108,7 @@ class MonitoringApp:
             "/dashboard-legacy": self.handle_dashboard_legacy,
             "/api/dashboard/stats": self.handle_api_stats,
             "/api/downloads": self.handle_api_downloads,
+            "/api/forwarded-video-tasks": self.handle_api_forwarded_video_tasks,
             "/api/uploads": self.handle_api_uploads,
             "/api/system": self.handle_api_system,
             "/api/health/checks": self.handle_api_health_checks,
@@ -504,6 +505,23 @@ class MonitoringApp:
         start_response("200 OK", [
             ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(response)))
+        ])
+        return [response]
+
+    def handle_api_forwarded_video_tasks(self, environ, start_response):
+        """返回最近的 Bot 转发视频批次任务。"""
+        if environ.get("REQUEST_METHOD") != "GET":
+            start_response("405 Method Not Allowed", [("Content-Type", "text/plain; charset=utf-8")])
+            return [b"Method Not Allowed"]
+
+        data = []
+        if _monitoring_db:
+            data = _monitoring_db.get_forwarded_video_batches(days=7, limit=100)
+
+        response = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        start_response("200 OK", [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(response))),
         ])
         return [response]
 

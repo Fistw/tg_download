@@ -328,7 +328,9 @@ async def setup_bot_handlers(
             logger.exception("Bot 下载失败")
             await event.reply(f"下载失败: {e}")
 
-    async def _download_video_batch(messages, chat_id: int, send_status) -> None:
+    async def _download_video_batch(
+        messages, chat_id: int, send_status, batch_type: str, sender_id: int
+    ) -> None:
         videos = [message for message in messages if _is_video_message(message)]
         if not videos:
             return
@@ -337,6 +339,22 @@ async def setup_bot_handlers(
         status_message = await send_status(f"开始下载，共 {total} 个视频…")
         downloaded_count = 0
         failed_count = 0
+        batch_id = None
+        monitoring_db = None
+        try:
+            from src.monitoring_db import get_monitoring_db
+
+            monitoring_db = get_monitoring_db()
+        except Exception:
+            logger.exception("初始化转发视频任务记录失败，将继续下载")
+
+        if monitoring_db is not None:
+            try:
+                batch_id = monitoring_db.start_forwarded_video_batch(
+                    batch_type, chat_id, sender_id, total
+                )
+            except Exception:
+                logger.exception("创建转发视频任务记录失败，将继续下载")
 
         for message in videos:
             try:
@@ -348,6 +366,24 @@ async def setup_bot_handlers(
 
             processed_count = downloaded_count + failed_count
             state = "下载完成" if processed_count == total else "下载中"
+            if processed_count == total:
+                if failed_count == 0:
+                    batch_status = "completed"
+                elif downloaded_count == 0:
+                    batch_status = "failed"
+                else:
+                    batch_status = "partially_failed"
+            else:
+                batch_status = "downloading"
+
+            if monitoring_db is not None and batch_id is not None:
+                try:
+                    monitoring_db.update_forwarded_video_batch(
+                        batch_id, downloaded_count, failed_count, batch_status
+                    )
+                except Exception:
+                    logger.exception("更新转发视频任务进度失败")
+
             progress = f"{state}：已下载 {downloaded_count}/{total} 个视频"
             if failed_count:
                 progress += f"，失败 {failed_count} 个"
@@ -454,7 +490,9 @@ async def setup_bot_handlers(
             return
 
         chat_id = event.chat_id or event.sender_id
-        await _download_video_batch([message], chat_id, event.reply)
+        await _download_video_batch(
+            [message], chat_id, event.reply, "single", event.sender_id
+        )
 
     @bot_client.on(events.Album)
     async def on_incoming_video_album(event):
@@ -471,7 +509,9 @@ async def setup_bot_handlers(
             return
 
         chat_id = event.chat_id or event.sender_id
-        await _download_video_batch(videos, chat_id, event.respond)
+        await _download_video_batch(
+            videos, chat_id, event.respond, "album", event.sender_id
+        )
 
     @bot_client.on(events.NewMessage(pattern=r"/status"))
     async def on_status(event):
