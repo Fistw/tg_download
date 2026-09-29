@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -29,6 +31,33 @@ def _is_allowed(user_id: int, allowed_users: list[int]) -> bool:
     if not allowed_users:
         return True
     return user_id in allowed_users
+
+
+def _is_video_message(message: Any) -> bool:
+    if getattr(message, "video", None):
+        return True
+    file_info = getattr(message, "file", None)
+    mime_type = getattr(file_info, "mime_type", None)
+    return bool(mime_type and mime_type.lower().startswith("video/"))
+
+
+def _video_download_name(message: Any, chat_id: int) -> str:
+    file_info = getattr(message, "file", None)
+    original_name = getattr(file_info, "name", None)
+    if original_name:
+        filename = Path(str(original_name).replace("\\", "/")).name
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", filename)
+        filename = filename.strip(" .")
+        if len(filename.encode("utf-8")) > 120:
+            original_suffix = Path(filename).suffix
+            suffix = original_suffix.encode("utf-8")[:24].decode("utf-8", errors="ignore")
+            stem = filename[: -len(original_suffix)] if original_suffix else filename
+            stem_limit = 120 - len(suffix.encode("utf-8"))
+            stem = stem.encode("utf-8")[:stem_limit].decode("utf-8", errors="ignore")
+            filename = f"{stem or 'video'}{suffix}"
+    else:
+        filename = "video.mp4"
+    return f"{chat_id}_{message.id}_{filename or 'video.mp4'}"
 
 
 async def _send_video_with_metadata(
@@ -332,6 +361,8 @@ async def setup_bot_handlers(
 
     @bot_client.on(events.NewMessage(pattern=r"/download\s+(.+)"))
     async def on_download(event):
+        if _is_video_message(event.message):
+            return
         if not _is_allowed(event.sender_id, allowed):
             await event.reply("你没有权限使用此 Bot")
             return
@@ -342,6 +373,8 @@ async def setup_bot_handlers(
 
     @bot_client.on(events.NewMessage(pattern=r"https?://t\.me/\S+"))
     async def on_link(event):
+        if _is_video_message(event.message):
+            return
         if (event.text or "").startswith("/"):
             return
         if not _is_allowed(event.sender_id, allowed):
@@ -351,6 +384,36 @@ async def setup_bot_handlers(
         link = event.text.strip()
         await event.reply(f"开始下载: {link}")
         await _handle_bot_download(event, link)
+
+    @bot_client.on(events.NewMessage(incoming=True))
+    async def on_incoming_video(event):
+        message = event.message
+        if not _is_video_message(message):
+            return
+
+        if not _is_allowed(event.sender_id, allowed):
+            await event.reply("你没有权限使用此 Bot")
+            return
+
+        chat_id = event.chat_id or event.sender_id
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        target = output_path / _video_download_name(message, chat_id)
+        if target.exists():
+            await event.reply(f"视频已保存在服务器：{target.name}")
+            return
+        temporary = output_path / f".{target.name}.{uuid.uuid4().hex}.part"
+
+        try:
+            downloaded = await bot_client.download_media(message, file=str(temporary))
+            if not downloaded:
+                raise RuntimeError("Telegram 未返回下载文件")
+            Path(downloaded).replace(target)
+            await event.reply(f"视频已保存到服务器：{target.name}")
+        except Exception as e:
+            temporary.unlink(missing_ok=True)
+            logger.exception("转发视频下载失败")
+            await event.reply(f"视频下载失败：{e}")
 
     @bot_client.on(events.NewMessage(pattern=r"/status"))
     async def on_status(event):
