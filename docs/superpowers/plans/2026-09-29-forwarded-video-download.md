@@ -4,7 +4,7 @@
 
 **Goal:** Let allowlisted users send videos to the Telegram bot and save each received video on the server.
 
-**Architecture:** Add a video-only incoming-message handler to `setup_bot_handlers`. The Bot client downloads its own incoming media into `config.download.output_dir`; filenames are sanitized and include the chat and message IDs. The handler replies with a result and does not re-send the file.
+**Architecture:** Add video-only incoming-message and album handlers to `setup_bot_handlers`. The Bot client downloads incoming media into `config.download.output_dir`; filenames are sanitized and include the chat and message IDs. Each batch gets one start/progress message, updated after each video; separate messages are independent batches.
 
 **Tech Stack:** Python 3.9+, Telethon, `pathlib`, existing `AppConfig` and allowlist helper.
 
@@ -59,7 +59,7 @@ The message ID makes repeated filenames in different incoming messages distinct;
 **Files:**
 - Modify: `src/bot_handler.py`
 
-- [x] **Step 1: Register an incoming video handler**
+- [x] **Step 1: Register incoming video and album handlers**
 
 Inside `setup_bot_handlers`, make video captions take precedence over link and `/download` patterns so one incoming video cannot start two downloads. Add this guard at the top of both `on_download` and `on_link`:
 
@@ -68,41 +68,44 @@ Inside `setup_bot_handlers`, make video captions take precedence over link and `
             return
 ```
 
-Then, after `on_link`, add:
+Add a shared batch helper inside `setup_bot_handlers`, after `_handle_bot_download`:
 
 ```python
-    @bot_client.on(events.NewMessage(incoming=True))
-    async def on_incoming_video(event):
-        message = event.message
-        if not _is_video_message(message):
+    async def _download_video_batch(messages, chat_id: int, send_status) -> None:
+        videos = [message for message in messages if _is_video_message(message)]
+        if not videos:
             return
 
-        if not _is_allowed(event.sender_id, allowed):
-            await event.reply("你没有权限使用此 Bot")
-            return
+        total = len(videos)
+        status_message = await send_status(f"开始下载，共 {total} 个视频…")
+        downloaded_count = 0
+        failed_count = 0
+        for message in videos:
+            try:
+                await _download_incoming_video(bot_client, message, output_dir, chat_id)
+                downloaded_count += 1
+            except Exception:
+                failed_count += 1
+                logger.exception("转发视频下载失败，消息 ID: %s", message.id)
 
-        chat_id = event.chat_id or event.sender_id
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        target = output_path / _video_download_name(message, chat_id)
-        if target.exists():
-            await event.reply(f"视频已保存在服务器：{target.name}")
-            return
-        temporary = output_path / f".{target.name}.{uuid.uuid4().hex}.part"
-
-        try:
-            downloaded = await bot_client.download_media(message, file=str(temporary))
-            if not downloaded:
-                raise RuntimeError("Telegram 未返回下载文件")
-            Path(downloaded).replace(target)
-            await event.reply(f"视频已保存到服务器：{target.name}")
-        except Exception as e:
-            temporary.unlink(missing_ok=True)
-            logger.exception("转发视频下载失败")
-            await event.reply(f"视频下载失败：{e}")
+            processed_count = downloaded_count + failed_count
+            state = "下载完成" if processed_count == total else "下载中"
+            progress = f"{state}：已下载 {downloaded_count}/{total} 个视频"
+            if failed_count:
+                progress += f"，失败 {failed_count} 个"
+            try:
+                await status_message.edit(progress)
+            except Exception:
+                logger.warning("更新转发视频下载进度失败")
+                try:
+                    status_message = await send_status(progress)
+                except Exception:
+                    logger.exception("发送转发视频下载进度失败")
 ```
 
-Telethon emits each item in a Telegram album as an incoming message, so each video is saved separately with its own message ID. The handler only responds to video media and leaves the existing link and command handlers unchanged.
+After `on_link`, add a `NewMessage(incoming=True)` handler for ungrouped video messages. It must return for messages with `grouped_id` so the album handler owns them. Authorize with `_is_allowed`, then call `_download_video_batch([message], chat_id, event.reply)`.
+
+Also add an `events.Album` handler. Ignore empty or outgoing albums, filter `event.messages` through `_is_video_message`, authorize `event.sender_id`, and call `_download_video_batch(videos, event.chat_id or event.sender_id, event.respond)`. A single video and each separate forwarded message are 1/1; an album reports the number of video items in that album. Telethon's Album event aggregates grouped messages, so it can report the total before downloading starts.
 
 ### Task 3: Review and deploy the change
 
@@ -117,7 +120,7 @@ Run `git diff --check` and inspect `git diff` to confirm that only incoming vide
 
 - [ ] **Step 2: Commit and publish**
 
-Commit the code and planning document with message `feat: save videos forwarded to bot`, then push the resulting `main` history to `Fistw/tg_download`.
+Commit the code and updated design/plan with message `feat: report forwarded video download progress`, then push the resulting `main` history to `Fistw/tg_download`.
 
 - [ ] **Step 3: Update the server and restart the service**
 

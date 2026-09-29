@@ -60,6 +60,30 @@ def _video_download_name(message: Any, chat_id: int) -> str:
     return f"{chat_id}_{message.id}_{filename or 'video.mp4'}"
 
 
+async def _download_incoming_video(
+    bot_client: TelegramClient,
+    message: Any,
+    output_dir: str,
+    chat_id: int,
+) -> Path:
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    target = output_path / _video_download_name(message, chat_id)
+    if target.exists():
+        return target
+
+    temporary = output_path / f".{target.name}.{uuid.uuid4().hex}.part"
+    try:
+        downloaded = await bot_client.download_media(message, file=str(temporary))
+        if not downloaded:
+            raise RuntimeError("Telegram 未返回下载文件")
+        Path(downloaded).replace(target)
+        return target
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 async def _send_video_with_metadata(
     bot_client: TelegramClient,
     chat_id: Any,
@@ -304,6 +328,38 @@ async def setup_bot_handlers(
             logger.exception("Bot 下载失败")
             await event.reply(f"下载失败: {e}")
 
+    async def _download_video_batch(messages, chat_id: int, send_status) -> None:
+        videos = [message for message in messages if _is_video_message(message)]
+        if not videos:
+            return
+
+        total = len(videos)
+        status_message = await send_status(f"开始下载，共 {total} 个视频…")
+        downloaded_count = 0
+        failed_count = 0
+
+        for message in videos:
+            try:
+                await _download_incoming_video(bot_client, message, output_dir, chat_id)
+                downloaded_count += 1
+            except Exception:
+                failed_count += 1
+                logger.exception("转发视频下载失败，消息 ID: %s", message.id)
+
+            processed_count = downloaded_count + failed_count
+            state = "下载完成" if processed_count == total else "下载中"
+            progress = f"{state}：已下载 {downloaded_count}/{total} 个视频"
+            if failed_count:
+                progress += f"，失败 {failed_count} 个"
+            try:
+                await status_message.edit(progress)
+            except Exception:
+                logger.warning("更新转发视频下载进度失败")
+                try:
+                    status_message = await send_status(progress)
+                except Exception:
+                    logger.exception("发送转发视频下载进度失败")
+
     @bot_client.on(events.NewMessage(pattern=r"/start"))
     async def on_start(event):
         if not _is_allowed(event.sender_id, allowed):
@@ -390,30 +446,32 @@ async def setup_bot_handlers(
         message = event.message
         if not _is_video_message(message):
             return
+        if getattr(message, "grouped_id", None):
+            return
 
         if not _is_allowed(event.sender_id, allowed):
             await event.reply("你没有权限使用此 Bot")
             return
 
         chat_id = event.chat_id or event.sender_id
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        target = output_path / _video_download_name(message, chat_id)
-        if target.exists():
-            await event.reply(f"视频已保存在服务器：{target.name}")
-            return
-        temporary = output_path / f".{target.name}.{uuid.uuid4().hex}.part"
+        await _download_video_batch([message], chat_id, event.reply)
 
-        try:
-            downloaded = await bot_client.download_media(message, file=str(temporary))
-            if not downloaded:
-                raise RuntimeError("Telegram 未返回下载文件")
-            Path(downloaded).replace(target)
-            await event.reply(f"视频已保存到服务器：{target.name}")
-        except Exception as e:
-            temporary.unlink(missing_ok=True)
-            logger.exception("转发视频下载失败")
-            await event.reply(f"视频下载失败：{e}")
+    @bot_client.on(events.Album)
+    async def on_incoming_video_album(event):
+        messages = list(event.messages)
+        if not messages or messages[0].out:
+            return
+
+        videos = [message for message in messages if _is_video_message(message)]
+        if not videos:
+            return
+
+        if not _is_allowed(event.sender_id, allowed):
+            await event.respond("你没有权限使用此 Bot")
+            return
+
+        chat_id = event.chat_id or event.sender_id
+        await _download_video_batch(videos, chat_id, event.respond)
 
     @bot_client.on(events.NewMessage(pattern=r"/status"))
     async def on_status(event):
