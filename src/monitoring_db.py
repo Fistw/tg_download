@@ -486,8 +486,21 @@ class MonitoringDB:
                         COUNT(*) as total_downloads,
                         COUNT(CASE WHEN status='completed' THEN 1 END) as completed_downloads,
                         COUNT(CASE WHEN status='downloading' THEN 1 END) as active_downloads,
+                        COUNT(CASE WHEN status='failed' THEN 1 END) as failed_downloads,
                         AVG(CASE WHEN status='completed' THEN speed_kb_s END) as avg_dl_speed
                     FROM download_metrics 
+                    WHERE created_at >= datetime('now', '-24 hours')
+                """).fetchone()
+
+                forwarded_stats = conn.execute("""
+                    SELECT
+                        COALESCE(SUM(total_videos), 0) AS total,
+                        COALESCE(SUM(downloaded_count), 0) AS completed,
+                        COALESCE(SUM(failed_count), 0) AS failed,
+                        COALESCE(SUM(CASE WHEN status = 'downloading'
+                            THEN MAX(total_videos - downloaded_count - failed_count, 0)
+                            ELSE 0 END), 0) AS active
+                    FROM forwarded_video_batches
                     WHERE created_at >= datetime('now', '-24 hours')
                 """).fetchone()
                 
@@ -529,9 +542,10 @@ class MonitoringDB:
                 
                 return {
                     "downloads": {
-                        "total": dl_stats["total_downloads"],
-                        "completed": dl_stats["completed_downloads"],
-                        "active": dl_stats["active_downloads"],
+                        "total": dl_stats["total_downloads"] + forwarded_stats["total"],
+                        "completed": dl_stats["completed_downloads"] + forwarded_stats["completed"],
+                        "active": dl_stats["active_downloads"] + forwarded_stats["active"],
+                        "failed": dl_stats["failed_downloads"] + forwarded_stats["failed"],
                         "avg_speed_kb_s": dl_stats["avg_dl_speed"] or 0
                     },
                     "uploads": {
