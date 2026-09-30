@@ -88,12 +88,15 @@ def get_system_metrics(download_dir: str | Path) -> dict:
         disk_usage = shutil.disk_usage(download_dir)
         if disk_usage.total <= 0:
             raise OSError("download filesystem reports zero capacity")
+        usable_bytes = disk_usage.used + disk_usage.free
+        if usable_bytes <= 0:
+            raise OSError("download filesystem reports no usable capacity")
         disk = {
             "available": True,
             "total_bytes": disk_usage.total,
             "used_bytes": disk_usage.used,
             "free_bytes": disk_usage.free,
-            "used_percent": round(disk_usage.used * 100 / disk_usage.total, 1),
+            "used_percent": round(disk_usage.used * 100 / usable_bytes, 1),
         }
     except OSError:
         disk = {
