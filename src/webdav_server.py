@@ -7,6 +7,7 @@ import mimetypes
 import os
 import http.client
 import socketserver
+import shutil
 import threading
 import time
 import urllib.parse
@@ -73,32 +74,51 @@ def set_deduplication_resources(deduplicator, download_db, chats=None, event_loo
         logger.info(f"已缓存 {len(chats)} 个聊天/频道")
 
 
-def get_system_metrics() -> dict:
-    """获取系统指标（简化版）"""
-    mem_percent = 0
-    cpu_percent = 0
-    
+def get_system_metrics(download_dir: str | Path) -> dict:
+    """获取系统指标和下载目录所在文件系统的容量。"""
     try:
-        # 尝试使用 psutil
         import psutil
-        mem_percent = psutil.virtual_memory().percent
-        cpu_percent = psutil.cpu_percent()
-    except ImportError:
-        pass
+        memory_percent = psutil.virtual_memory().percent
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+    except Exception:
+        memory_percent = None
+        cpu_percent = None
+
+    try:
+        disk_usage = shutil.disk_usage(download_dir)
+        if disk_usage.total <= 0:
+            raise OSError("download filesystem reports zero capacity")
+        disk = {
+            "available": True,
+            "total_bytes": disk_usage.total,
+            "used_bytes": disk_usage.used,
+            "free_bytes": disk_usage.free,
+            "used_percent": round(disk_usage.used * 100 / disk_usage.total, 1),
+        }
+    except OSError:
+        disk = {
+            "available": False,
+            "total_bytes": None,
+            "used_bytes": None,
+            "free_bytes": None,
+            "used_percent": None,
+        }
     
     return {
-        "memory_percent": mem_percent,
+        "memory_percent": memory_percent,
         "cpu_percent": cpu_percent,
-        "active_connections": 0
+        "active_connections": 0,
+        "disk": disk,
     }
 
 
 class MonitoringApp:
     """简单的监控 WSGI 应用，支持基于 Cookie 的会话认证"""
 
-    def __init__(self, static_dir: Path, web_dist_dir: Path, username: str, password: str):
+    def __init__(self, static_dir: Path, web_dist_dir: Path, username: str, password: str, download_dir: str | Path):
         self.static_dir = static_dir
         self.web_dist_dir = web_dist_dir
+        self.download_dir = Path(download_dir)
         self.username = username
         self.password = password
         self.sessions = {}  # 存储会话
@@ -485,7 +505,7 @@ class MonitoringApp:
             stats = _monitoring_db.get_dashboard_stats()
         
         # 添加最新系统指标
-        sys_metrics = get_system_metrics()
+        sys_metrics = get_system_metrics(self.download_dir)
         stats["system"] = sys_metrics
         
         response = json.dumps(stats, ensure_ascii=False).encode("utf-8")
@@ -1245,7 +1265,13 @@ class WebDAVServer:
                 wd_config = self._build_webdav_config()
                 webdav_app_obj = WsgiDAVApp(wd_config)
             
-            monitoring_app = MonitoringApp(self._static_dir, self._web_dist_dir, self.config.monitoring_username, self.config.monitoring_password)
+            monitoring_app = MonitoringApp(
+                self._static_dir,
+                self._web_dist_dir,
+                self.config.monitoring_username,
+                self.config.monitoring_password,
+                self.download_dir,
+            )
             combined_app = CombinedApp(
                 webdav_app_obj,
                 monitoring_app,
@@ -1256,8 +1282,12 @@ class WebDAVServer:
             def collect_system_metrics():
                 while not self._stop_event.is_set():
                     if _monitoring_db:
-                        metrics = get_system_metrics()
-                        _monitoring_db.record_system_metrics(**metrics)
+                        metrics = get_system_metrics(self.download_dir)
+                        _monitoring_db.record_system_metrics(
+                            memory_percent=metrics["memory_percent"],
+                            cpu_percent=metrics["cpu_percent"],
+                            active_connections=metrics["active_connections"],
+                        )
                     time.sleep(30)
             
             metrics_thread = threading.Thread(target=collect_system_metrics, daemon=True)
