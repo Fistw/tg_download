@@ -22,8 +22,7 @@ import { apiClient } from '../api/client'
 import type { DashboardStats, DownloadItem, UploadItem, RecoveryItem } from '../types'
 
 function formatFileSize(bytes: number): string {
-  if (!bytes) return '-'
-  const units = ['B', 'KB', 'MB', 'GB']
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
   let i = 0
   let size = bytes
   while (size >= 1024 && i < units.length - 1) {
@@ -61,19 +60,26 @@ export default function Overview() {
   const [uploads, setUploads] = useState<UploadItem[]>([])
   const [recoveries, setRecoveries] = useState<RecoveryItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [errors, setErrors] = useState({ stats: false, downloads: false, uploads: false, recoveries: false })
 
   const fetchData = async () => {
     try {
-      const [statsData, downloadsData, uploadsData, recoveriesData] = await Promise.all([
+      const results = await Promise.allSettled([
         apiClient.getDashboardStats(),
         apiClient.getDownloads(),
         apiClient.getUploads(),
         apiClient.getRecoveries(),
       ])
-      setStats(statsData)
-      setDownloads(downloadsData)
-      setUploads(uploadsData)
-      setRecoveries(recoveriesData)
+      if (results[0].status === 'fulfilled') setStats(results[0].value)
+      if (results[1].status === 'fulfilled') setDownloads(results[1].value)
+      if (results[2].status === 'fulfilled') setUploads(results[2].value)
+      if (results[3].status === 'fulfilled') setRecoveries(results[3].value)
+      setErrors({
+        stats: results[0].status === 'rejected',
+        downloads: results[1].status === 'rejected',
+        uploads: results[2].status === 'rejected',
+        recoveries: results[3].status === 'rejected',
+      })
     } catch (err) {
       console.error('Error fetching data:', err)
     } finally {
@@ -111,8 +117,10 @@ export default function Overview() {
     )
   }
 
-  const memPercent = stats ? Math.round(stats.system.memory_percent) : 0
-  const cpuPercent = stats ? Math.round(stats.system.cpu_percent) : 0
+  const memPercent = stats?.system.memory_percent == null ? null : Math.round(stats.system.memory_percent)
+  const cpuPercent = stats?.system.cpu_percent == null ? null : Math.round(stats.system.cpu_percent)
+  const disk = stats?.system.disk
+  const diskPercent = disk?.used_percent ?? 0
 
   return (
     <Box>
@@ -124,6 +132,7 @@ export default function Overview() {
           <Typography variant="body1" sx={{ color: 'text.secondary', mt: 1 }}>
             监控您的下载和上传状态
           </Typography>
+          {errors.stats && <Typography variant="body2" color="error" sx={{ mt: 1 }}>统计数据加载失败，请刷新重试</Typography>}
         </Box>
         <Button
           variant="contained"
@@ -145,7 +154,7 @@ export default function Overview() {
                     下载统计
                   </Typography>
                   <Typography variant="h4" sx={{ fontWeight: 700, color: 'text.primary', mt: 1 }}>
-                    {stats?.downloads.total || 0}
+                    {stats ? stats.downloads.total : '不可用'}
                   </Typography>
                 </Box>
                 <Box sx={{ bgcolor: 'success.light', borderRadius: 2, p: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -156,13 +165,19 @@ export default function Overview() {
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'warning.main' }} />
                   <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                    活跃: {stats?.downloads.active || 0}
+                    活跃: {stats ? stats.downloads.active : '不可用'}
                   </Typography>
                 </Box>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'success.main' }} />
                   <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                    完成: {stats?.downloads.completed || 0}
+                    完成: {stats ? stats.downloads.completed : '不可用'}
+                  </Typography>
+                </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'error.main' }} />
+                  <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                    失败: {stats?.downloads.failed ?? '不可用'}
                   </Typography>
                 </Box>
               </Box>
@@ -172,7 +187,7 @@ export default function Overview() {
                   平均速度:{' '}
                 </Typography>
                 <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                  {formatSpeed(stats?.downloads.avg_speed_kb_s || 0)}
+                  {stats ? formatSpeed(stats.downloads.avg_speed_kb_s) : '不可用'}
                 </Typography>
               </Box>
             </CardContent>
@@ -188,7 +203,7 @@ export default function Overview() {
                     上传统计
                   </Typography>
                   <Typography variant="h4" sx={{ fontWeight: 700, color: 'text.primary', mt: 1 }}>
-                    {stats?.uploads.total || 0}
+                    {stats ? stats.uploads.total : '不可用'}
                   </Typography>
                 </Box>
                 <Box sx={{ bgcolor: 'primary.light', borderRadius: 2, p: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -199,13 +214,13 @@ export default function Overview() {
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'warning.main' }} />
                   <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                    活跃: {stats?.uploads.active || 0}
+                    活跃: {stats ? stats.uploads.active : '不可用'}
                   </Typography>
                 </Box>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: 'success.main' }} />
                   <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                    完成: {stats?.uploads.completed || 0}
+                    完成: {stats ? stats.uploads.completed : '不可用'}
                   </Typography>
                 </Box>
               </Box>
@@ -215,7 +230,7 @@ export default function Overview() {
                   平均速度:{' '}
                 </Typography>
                 <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                  {formatSpeed(stats?.uploads.avg_speed_kb_s || 0)}
+                  {stats ? formatSpeed(stats.uploads.avg_speed_kb_s) : '不可用'}
                 </Typography>
               </Box>
             </CardContent>
@@ -231,7 +246,7 @@ export default function Overview() {
                     内存使用
                   </Typography>
                   <Typography variant="h4" sx={{ fontWeight: 700, color: 'text.primary', mt: 1 }}>
-                    {memPercent}%
+                    {memPercent == null ? '不可用' : `${memPercent}%`}
                   </Typography>
                 </Box>
                 <Box sx={{ bgcolor: 'secondary.light', borderRadius: 2, p: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -243,7 +258,7 @@ export default function Overview() {
                   <Box
                     sx={{
                       height: '100%',
-                      width: `${memPercent}%`,
+                      width: `${memPercent ?? 0}%`,
                       bgcolor: 'secondary.main',
                       borderRadius: 4,
                       transition: 'width 0.5s ease',
@@ -264,7 +279,7 @@ export default function Overview() {
                     CPU使用
                   </Typography>
                   <Typography variant="h4" sx={{ fontWeight: 700, color: 'text.primary', mt: 1 }}>
-                    {cpuPercent}%
+                    {cpuPercent == null ? '不可用' : `${cpuPercent}%`}
                   </Typography>
                 </Box>
                 <Box sx={{ bgcolor: 'warning.light', borderRadius: 2, p: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -276,13 +291,51 @@ export default function Overview() {
                   <Box
                     sx={{
                       height: '100%',
-                      width: `${cpuPercent}%`,
+                      width: `${cpuPercent ?? 0}%`,
                       bgcolor: 'warning.main',
                       borderRadius: 4,
                       transition: 'width 0.5s ease',
                     }}
                   />
                 </Box>
+              </Box>
+            </CardContent>
+          </Card>
+        </Box>
+
+        <Box sx={{ flex: '1 1 250px', minWidth: 250 }}>
+          <Card elevation={1} sx={{ borderRadius: 3 }}>
+            <CardContent>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
+                <Box>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    磁盘用量
+                  </Typography>
+                  <Typography variant="h4" sx={{ fontWeight: 700, color: 'text.primary', mt: 1 }}>
+                    {disk?.available ? `${diskPercent}%` : '不可用'}
+                  </Typography>
+                </Box>
+                <Box sx={{ bgcolor: 'info.light', borderRadius: 2, p: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <span style={{ color: 'info.main', fontSize: 28 }}>💾</span>
+                </Box>
+              </Box>
+              <Box sx={{ mt: 2 }}>
+                <Box sx={{ height: 8, bgcolor: 'grey.200', borderRadius: 4, overflow: 'hidden' }}>
+                  <Box
+                    sx={{
+                      height: '100%',
+                      width: `${disk?.available ? diskPercent : 0}%`,
+                      bgcolor: 'info.main',
+                      borderRadius: 4,
+                      transition: 'width 0.5s ease',
+                    }}
+                  />
+                </Box>
+                <Typography variant="body2" sx={{ color: 'text.secondary', mt: 1 }}>
+                  {disk?.available
+                    ? `已用 ${formatFileSize(disk.used_bytes ?? 0)} / 总量 ${formatFileSize(disk.total_bytes ?? 0)}，可用 ${formatFileSize(disk.free_bytes ?? 0)}`
+                    : '磁盘容量不可用'}
+                </Typography>
               </Box>
             </CardContent>
           </Card>
@@ -337,9 +390,10 @@ export default function Overview() {
                 恢复历史
               </Typography>
             </Box>
+            {errors.recoveries && <Typography variant="body2" color="error" sx={{ mb: 2 }}>恢复历史加载失败，请刷新重试</Typography>}
             {recoveries.length === 0 ? (
               <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                暂无恢复记录
+                {errors.recoveries ? '数据加载失败' : '暂无恢复记录'}
               </Typography>
             ) : (
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -379,8 +433,9 @@ export default function Overview() {
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 3 }}>
               下载速度趋势
             </Typography>
+            {errors.downloads && <Typography variant="body2" color="error" sx={{ mb: 2 }}>下载数据加载失败，请刷新重试</Typography>}
             <Box sx={{ height: 200 }}>
-              {downloadChartData.length > 0 && (
+              {downloadChartData.length > 0 ? (
                 <LineChart
                   dataset={downloadChartData}
                   xAxis={[{ dataKey: 'time', scaleType: 'point' }]}
@@ -394,6 +449,10 @@ export default function Overview() {
                   ]}
                   grid={{ vertical: true, horizontal: true }}
                 />
+              ) : (
+                <Typography variant="body2" sx={{ color: 'text.secondary', pt: 8, textAlign: 'center' }}>
+                  暂无速度数据
+                </Typography>
               )}
             </Box>
           </Paper>
@@ -404,8 +463,9 @@ export default function Overview() {
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 3 }}>
               上传速度趋势
             </Typography>
+            {errors.uploads && <Typography variant="body2" color="error" sx={{ mb: 2 }}>上传数据加载失败，请刷新重试</Typography>}
             <Box sx={{ height: 200 }}>
-              {uploadChartData.length > 0 && (
+              {uploadChartData.length > 0 ? (
                 <LineChart
                   dataset={uploadChartData}
                   xAxis={[{ dataKey: 'time', scaleType: 'point' }]}
@@ -419,6 +479,10 @@ export default function Overview() {
                   ]}
                   grid={{ vertical: true, horizontal: true }}
                 />
+              ) : (
+                <Typography variant="body2" sx={{ color: 'text.secondary', pt: 8, textAlign: 'center' }}>
+                  暂无速度数据
+                </Typography>
               )}
             </Box>
           </Paper>
@@ -431,6 +495,7 @@ export default function Overview() {
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 3 }}>
               下载历史
             </Typography>
+            {errors.downloads && <Typography variant="body2" color="error" sx={{ mb: 2 }}>下载历史加载失败，请刷新重试</Typography>}
             <TableContainer>
               <Table size="small">
                 <TableHead>
@@ -442,6 +507,13 @@ export default function Overview() {
                   </TableRow>
                 </TableHead>
                 <TableBody>
+                  {downloads.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={4} align="center" sx={{ color: 'text.secondary' }}>
+                        {errors.downloads ? '数据加载失败' : '暂无记录'}
+                      </TableCell>
+                    </TableRow>
+                  )}
                   {downloads.slice(0, 6).map((item, index) => (
                     <TableRow key={index} hover>
                       <TableCell>
@@ -477,6 +549,7 @@ export default function Overview() {
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 3 }}>
               上传历史
             </Typography>
+            {errors.uploads && <Typography variant="body2" color="error" sx={{ mb: 2 }}>上传历史加载失败，请刷新重试</Typography>}
             <TableContainer>
               <Table size="small">
                 <TableHead>
@@ -488,6 +561,13 @@ export default function Overview() {
                   </TableRow>
                 </TableHead>
                 <TableBody>
+                  {uploads.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={4} align="center" sx={{ color: 'text.secondary' }}>
+                        {errors.uploads ? '数据加载失败' : '暂无记录'}
+                      </TableCell>
+                    </TableRow>
+                  )}
                   {uploads.slice(0, 6).map((item, index) => (
                     <TableRow key={index} hover>
                       <TableCell>

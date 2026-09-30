@@ -31,6 +31,7 @@ export interface DownloadStats {
   total: number;
   active: number;
   completed: number;
+  failed: number;
   avg_speed_kb_s: number;
 }
 
@@ -42,8 +43,15 @@ export interface UploadStats {
 }
 
 export interface SystemStats {
-  memory_percent: number;
-  cpu_percent: number;
+  memory_percent: number | null;
+  cpu_percent: number | null;
+  disk: {
+    available: boolean;
+    total_bytes: number | null;
+    used_bytes: number | null;
+    free_bytes: number | null;
+    used_percent: number | null;
+  };
 }
 
 export interface HealthCheck {
