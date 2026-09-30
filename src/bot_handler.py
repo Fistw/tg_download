@@ -272,6 +272,24 @@ async def setup_bot_handlers(
     allowed = config.bot.allowed_users
     output_dir = config.download.output_dir
 
+    def _cleanup_download_cache(reason: str) -> None:
+        if not config.download.enable_cache_cleanup:
+            return
+        try:
+            result = cleanup_cache(
+                Path(output_dir),
+                config.download.cache_retention_days,
+                config.download.max_cache_size_gb,
+            )
+            logger.info(
+                "转发视频任务%s后清理缓存完成：删除 %s 个文件，释放 %.2f GB",
+                reason,
+                len(result.deleted_files),
+                result.total_freed_bytes / (1024 ** 3),
+            )
+        except Exception:
+            logger.exception("转发视频任务%s时清理缓存失败", reason)
+
     async def _handle_bot_download(event, link: str) -> None:
         """Bot 下载公共逻辑：记录数据库 + 下载 + 发送文件。"""
         try:
@@ -356,6 +374,9 @@ async def setup_bot_handlers(
             except Exception:
                 logger.exception("创建转发视频任务记录失败，将继续下载")
 
+        # 下载前先应用已有的保留期和容量限制，避免目录已超限时继续占满磁盘。
+        _cleanup_download_cache("开始前")
+
         for message in videos:
             try:
                 await _download_incoming_video(bot_client, message, output_dir, chat_id)
@@ -395,6 +416,9 @@ async def setup_bot_handlers(
                     status_message = await send_status(progress)
                 except Exception:
                     logger.exception("发送转发视频下载进度失败")
+
+        # 与现有下载流程一致，任务完成后再次按保留期和容量限制清理。
+        _cleanup_download_cache("完成后")
 
     @bot_client.on(events.NewMessage(pattern=r"/start"))
     async def on_start(event):
